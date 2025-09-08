@@ -73,12 +73,31 @@ generate_migration_report() {
 error_trap() {
   warn "Ошибка на шаге. См. статус служб ниже:"
   (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2
+
+  log "[status] ------ Статус контейнера ------"
+  docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  log "[status] ------ Docker inspect (state) ------"
+  docker inspect -f 'State: {{.State.Status}}, Exit: {{.State.ExitCode}}, Restarts: {{.RestartCount}}' "$CONTAINER_NAME" 2>&1 \
+    | sed -e "s/^/[status] /" >&2 || true
+
   log "[status] ------ Последние строки docker logs ------"
   docker logs --tail 20 "$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
+
   log "[status] ------ Последние строки chef-client.log ------"
-  docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
+    docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 \
+      | sed -e "s/^/[status] /" >&2 || true
+  else
+    log "[status] файл /var/log/gitlab/chef-client.log отсутствует"
+  fi
+
   log "[status] ------ Последние строки reconfigure.log ------"
-  docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/reconfigure.log >/dev/null 2>&1; then
+    docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 \
+      | sed -e "s/^/[status] /" >&2 || true
+  else
+    log "[status] файл /var/log/gitlab/reconfigure.log отсутствует"
+  fi
 }
 
 main() {

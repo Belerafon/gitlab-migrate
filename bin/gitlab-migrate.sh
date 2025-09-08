@@ -81,7 +81,7 @@ error_trap() {
     | sed -e "s/^/[status] /" >&2 || true
 
   log "[status] ------ Последние строки docker logs ------"
-  docker logs --tail 20 "$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
 
   log "[status] ------ Последние строки chef-client.log ------"
   if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
@@ -89,6 +89,8 @@ error_trap() {
       | sed -e "s/^/[status] /" >&2 || true
   else
     log "[status] файл /var/log/gitlab/chef-client.log отсутствует"
+    docker exec -i "$CONTAINER_NAME" ls -l /var/log/gitlab 2>&1 \
+      | sed -e "s/^/[status] /" >&2 || true
   fi
 
   log "[status] ------ Последние строки reconfigure.log ------"
@@ -97,6 +99,8 @@ error_trap() {
       | sed -e "s/^/[status] /" >&2 || true
   else
     log "[status] файл /var/log/gitlab/reconfigure.log отсутствует"
+    docker exec -i "$CONTAINER_NAME" ls -l /var/log/gitlab 2>&1 \
+      | sed -e "s/^/[status] /" >&2 || true
   fi
 }
 
@@ -140,6 +144,18 @@ main() {
   else
     ok "Базовый контейнер уже стартовал — пропускаю запуск"; show_versions
   fi
+
+  wait_gitlab_ready
+  wait_postgres_ready
+
+  log "[>] Предварительная подготовка контейнера перед восстановлением (update-permissions)"
+  if dexec 'update-permissions'; then
+    ok "update-permissions выполнен"
+  else
+    warn "update-permissions завершился с ошибкой"
+  fi
+  docker restart "$CONTAINER_NAME" >/dev/null || true
+  sleep "$WAIT_AFTER_START"
 
   wait_gitlab_ready
   wait_postgres_ready

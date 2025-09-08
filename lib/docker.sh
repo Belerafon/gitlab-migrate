@@ -68,6 +68,11 @@ run_container() {
   log "[>] Запуск контейнера ${CONTAINER_NAME} c образом ${image}"
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   log "[>] Предварительное выравнивание прав (update-permissions)…"
+  # Скрипт update-permissions входит в образ GitLab и использует его встроенные утилиты
+  # (например, для вычисления UID/GID и исправления множества путей). Запускать его
+  # напрямую с хоста сложно: придётся тащить весь необходимый стек. Поэтому мы
+  # запускаем короткоживущий контейнер, который выполняет update-permissions в
+  # «родной» среде перед стартом основного инстанса.
   docker run --rm \
     -v "$DATA_ROOT/config:/etc/gitlab" \
     -v "$DATA_ROOT/data:/var/opt/gitlab" \

@@ -16,6 +16,28 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
 
+LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
+
+cleanup_previous_run() {
+  if [ -f "$LOCK_FILE" ]; then
+    local old_pid
+    old_pid="$(cat "$LOCK_FILE")"
+    if [ -n "$old_pid" ]; then
+      if ps -p "$old_pid" -o cmd= 2>/dev/null | grep -q 'gitlab-migrate.sh'; then
+        log "[!] Обнаружен запущенный экземпляр (PID $old_pid) — останавливаю"
+        kill "$old_pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$old_pid" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$LOCK_FILE"
+  fi
+  echo $$ > "$LOCK_FILE"
+  trap 'rm -f "$LOCK_FILE"' EXIT
+}
+
+cleanup_previous_run
+
 reset_migration() {
   log "[!] Сброс миграции: удаление контейнеров, данных и состояния"
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true

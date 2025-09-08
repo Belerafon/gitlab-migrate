@@ -45,12 +45,19 @@ generate_migration_report() {
     log "  - Последняя версия: $last_upgraded"
   fi
 
-  log "\nДанные:"
-  local project_count user_count
-  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "0")
-  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users WHERE state='\''active'\'';" 2>/dev/null | tr -d "[:space:]" || echo "0")
+  log "\nСтатистика восстановления:"
+  local project_count user_count issue_count repo_size db_size
+  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
+  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users WHERE state='\''active'\'';" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
+  issue_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM issues;" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
+  repo_size=$(dexec 'du -sh /var/opt/gitlab/git-data/repositories | cut -f1' 2>/dev/null || echo "unknown"')
+  db_size=$(dexec 'du -sh /var/opt/gitlab/postgresql/data | cut -f1' 2>/dev/null || echo "unknown"')
+  
   log "  - Проекты: $project_count"
   log "  - Активные пользователи: $user_count"
+  log "  - Задачи: $issue_count"
+  log "  - Размер репозиториев: $repo_size"
+  log "  - Размер базы данных: $db_size"
 
   log "\nСостояние служб:"
   dexec 'gitlab-ctl status' 2>/dev/null | sed 's/^/  - /' || log "  - Службы недоступны"

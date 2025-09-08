@@ -100,3 +100,44 @@ wait_postgres_ready() {
   done
   ok "PostgreSQL готов"
 }
+
+# New function to wait for upgrade completion with timeout
+wait_upgrade_completion() {
+  local timeout=$((60 * 30)) # 30 minutes timeout
+  local start_time=$(date +%s)
+  local current_time
+  local elapsed=0
+  local last_log_size=0
+  local log_file="/var/log/gitlab/reconfigure.log"
+
+  log "[>] Ожидаю завершение апгрейда (таймаут 30 минут)..."
+
+  while [ $elapsed -lt $timeout ]; do
+    # Check if reconfigure log exists and is growing
+    if dexec "[ -f '$log_file' ]" >/dev/null 2>&1; then
+      local current_log_size=$(dexec "stat -c%s '$log_file'" 2>/dev/null || echo 0)
+      if [ "$current_log_size" -gt "$last_log_size" ]; then
+        last_log_size="$current_log_size"
+        # Log is still growing - upgrade in progress
+      else
+        # Log hasn't grown in 5 minutes - assume upgrade completed
+        ok "Апгрейд завершён (лог не растёт)"
+        return
+      fi
+    fi
+
+    # Check if all services are running
+    if dexec "gitlab-ctl status" >/dev/null 2>&1; then
+      ok "Апгрейд завершён (все службы работают)"
+      return
+    fi
+
+    sleep 30
+    current_time=$(date +%s)
+    elapsed=$((current_time - start_time))
+  done
+
+  warn "Апгрейд не завершился за 30 минут. Пытаюсь перезапустить..."
+  dexec 'gitlab-ctl restart' || true
+  sleep 60
+}

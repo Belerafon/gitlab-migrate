@@ -210,20 +210,46 @@ verify_restore_success() {
   # Start services inside container
   dexec 'gitlab-ctl start' || true
   sleep 30
+
+  # Wait for GitLab and PostgreSQL to be ready
   wait_gitlab_ready
   wait_postgres_ready
+
+  # Explicitly check critical services
+  local services=("gitaly" "postgresql" "redis" "sshd")
+  local service_ok=1
+  for service in "${services[@]}"; do
+    if dexec "gitlab-ctl status ${service} | grep -q 'run:'"; then
+      ok "Служба $service запущена"
+    else
+      warn "Служба $service не запущена"
+      service_ok=0
+    fi
+  done
+
+  # Exit if any critical service is down
+  if [ $service_ok -eq 0 ]; then
+    err "Критические службы не запустились после восстановления"
+    exit 1
+  fi
 
   log "[>] Проверка миграций после восстановления…"
   dexec 'gitlab-rake db:migrate:status | tail -n +1' || true
 
   log "[>] Проверка состояния базы данных…"
-  local project_count
+  local project_count user_count issue_count
   project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  issue_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM issues;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  
   if [ "${project_count:-0}" -gt 0 ]; then
     ok "База данных содержит ${project_count} проектов"
   else
     warn "База данных пуста или недоступна"
   fi
+
+  log "  - Пользователи: $user_count"
+  log "  - Ишью: $issue_count"
 
   log "[>] Проверка веб‑интерфейса…"
   local http_status
@@ -236,6 +262,10 @@ verify_restore_success() {
 
   log "[>] Проверка фоновых миграций…"
   dexec 'gitlab-rake gitlab:background_migrations:status' || true
+
+  log "[>] Размер восстановленных данных:"
+  dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'
+  dexec 'du -sh /var/opt/gitlab/postgresql/data | awk '\''{print "  - База данных: "$1}'\'' || true'
 
   ok "Восстановление проверено"
   set_state RESTORE_DONE 1

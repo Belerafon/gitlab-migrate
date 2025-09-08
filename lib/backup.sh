@@ -1,4 +1,7 @@
 # lib/backup.sh
+# Source docker lib for container_running function
+. "$BASEDIR/lib/docker.sh"
+
 find_latest_backup_in_src() {
   local backup_files=()
   for pattern in "*_gitlab_backup.tar" "*_gitlab_backup.tar.gz"; do
@@ -196,6 +199,15 @@ restore_backup_if_needed() {
 
 verify_restore_success() {
   log "[>] Запускаю все службы после восстановления…"
+  
+  # Ensure container is running
+  if ! container_running; then
+    log "[>] Контейнер не запущен — запускаю…"
+    docker start "$CONTAINER_NAME" >/dev/null || true
+    sleep 30
+  fi
+  
+  # Start services inside container
   dexec 'gitlab-ctl start' || true
   sleep 30
   wait_gitlab_ready

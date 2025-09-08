@@ -1,4 +1,5 @@
 # lib/backup.sh
+# shellcheck shell=bash
 # Source docker lib for container_running function
 . "$BASEDIR/lib/docker.sh"
 
@@ -81,16 +82,24 @@ normalize_backup_name() {
 }
 
 fix_owners() {
-  local UIDG U G
-  UIDG=$(dexec 'printf "%s:%s" "$(id -u git)" "$(id -g git)"' 2>/dev/null || echo "998:998")
-  UIDG=$(printf "%s" "$UIDG" | tr -d '\n')
-  U=${UIDG%%:*}
-  G=${UIDG##*:}
+  local UIDG_GIT U_GIT G_GIT UIDG_PSQL U_PSQL G_PSQL
+
+  UIDG_GIT=$(dexec 'printf "%s:%s" "$(id -u git)" "$(id -g git)"' 2>/dev/null || echo "998:998")
+  UIDG_GIT=$(printf "%s" "$UIDG_GIT" | tr -d '\n')
+  U_GIT=${UIDG_GIT%%:*}
+  G_GIT=${UIDG_GIT##*:}
+
+  UIDG_PSQL=$(dexec 'printf "%s:%s" "$(id -u gitlab-psql)" "$(id -g gitlab-psql)"' 2>/dev/null || echo "996:996")
+  UIDG_PSQL=$(printf "%s" "$UIDG_PSQL" | tr -d '\n')
+  U_PSQL=${UIDG_PSQL%%:*}
+  G_PSQL=${UIDG_PSQL##*:}
+
   chown -R root:root "$DATA_ROOT/config"
-  chown -R "$U:$G" "$DATA_ROOT/data" "$DATA_ROOT/logs"
+  chown -R "$U_GIT:$G_GIT" "$DATA_ROOT/data" "$DATA_ROOT/logs"
+  chown -R "$U_PSQL:$G_PSQL" "$DATA_ROOT/data/postgresql" 2>/dev/null || true
   chmod 700 "$DATA_ROOT/data/backups" 2>/dev/null || true
   chmod 600 "$DATA_ROOT/data/backups"/*gitlab_backup.tar* 2>/dev/null || true
-  ok "Права на каталоги выровнены (git uid:gid = $U:$G)"
+  ok "Права на каталоги выровнены (git uid:gid = $U_GIT:$G_GIT, gitlab-psql uid:gid = $U_PSQL:$G_PSQL)"
 }
 
 restore_backup_if_needed() {
@@ -134,6 +143,7 @@ restore_backup_if_needed() {
   wait_postgres_ready
 
   fix_owners
+  dexec 'update-permissions' >/dev/null 2>&1 || warn "update-permissions после fix_owners завершился с ошибкой"
 
   log "[>] Проверка свободного места перед восстановлением…"
   dexec "df -h /var/opt/gitlab" || true
@@ -155,10 +165,12 @@ restore_backup_if_needed() {
     rc_before=$(container_restart_count)
 
     # Выполняем восстановление и сохраняем код возврата
+    trap - ERR
     set +e
-    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \${PIPESTATUS[0]}"
+    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \\${PIPESTATUS[0]}"
     cmd_rc=$?
     set -e
+    trap error_trap ERR
     if [ $cmd_rc -eq 0 ]; then
       ok "Восстановление успешно завершено на попытке $restore_attempt"
       log "[i] Код возврата gitlab-backup restore: $cmd_rc"
@@ -174,6 +186,12 @@ restore_backup_if_needed() {
       # Show critical last 50 lines regardless of error patterns
       log "------ Последние 50 строк лога ------"
       dexec "tail -n 50 '${rlog}'" || true
+      log "------ Проверка прав Postgres ------"
+      dexec "ls -ld /var/opt/gitlab/postgresql /var/opt/gitlab/postgresql/data /var/opt/gitlab/postgresql/data/global" 2>&1 || true
+      if dexec "test -e /var/opt/gitlab/postgresql/data/global/pg_filenode.map" >/dev/null 2>&1; then
+        dexec "ls -l /var/opt/gitlab/postgresql/data/global/pg_filenode.map" || true
+      fi
+
 
       # Дополнительные данные о состоянии контейнера
       log "------ Статус контейнера ------"

@@ -201,8 +201,14 @@ restore_backup_if_needed() {
       # Дополнительные данные о состоянии контейнера
       log "------ Статус контейнера ------"
       docker ps -a --filter "name=$CONTAINER_NAME" || true
-      log "------ Последние строки docker logs ------"
-      docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
+      log "------ Ошибки из docker logs ------"
+      local dlog
+      dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
+      if printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' >/dev/null; then
+        printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' || true
+      else
+        printf '%s\n' "$dlog"
+      fi
 
       log "------ Последние строки chef-client.log ------"
       if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then

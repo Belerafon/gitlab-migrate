@@ -43,7 +43,8 @@ reset_migration() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   if [ -d "$DATA_ROOT" ]; then
     log "[>] Очистка директории данных: $DATA_ROOT"
-    rm -rf "$DATA_ROOT"/*
+    rm -rf "$DATA_ROOT" 2>/dev/null || true
+    mkdir -p "$DATA_ROOT"/{config,data,logs}
   fi
   state_clear
   ok "Миграция сброшена. Можно запускать заново."
@@ -102,8 +103,12 @@ error_trap() {
   docker inspect -f 'State: {{.State.Status}}, Exit: {{.State.ExitCode}}, OOMKilled: {{.State.OOMKilled}}, Restarts: {{.RestartCount}}' "$CONTAINER_NAME" 2>&1 \
     | sed -e "s/^/[status] /" >&2 || true
 
+  local dlog
+  dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
+  log "[status] ------ Ошибки из docker logs ------"
+  printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' | sed -e "s/^/[status] /" >&2 || true
   log "[status] ------ Последние строки docker logs ------"
-  docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  printf '%s\n' "$dlog" | sed -e "s/^/[status] /" >&2 || true
 
   log "[status] ------ Последние строки chef-client.log ------"
   if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then

@@ -5,10 +5,24 @@ docker_ok() { docker info >/dev/null 2>&1; }
 
 # Use non-login shell to avoid TTY errors
 dexec() {
-  local cmd="$1"
-  # Выводим stderr и убираем предупреждение mesg, сохраняя код возврата docker exec
-  docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1 | grep -v "mesg: ttyname failed"
-  return ${PIPESTATUS[0]}
+  local cmd="$1" out rc
+  # Выполняем команду и сохраняем stdout/stderr вместе с кодом возврата
+  out=$(docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1)
+  rc=$?
+  # Фильтруем надоедливое предупреждение mesg
+  out=$(printf "%s" "$out" | grep -v "mesg: ttyname failed")
+  printf "%s" "$out"
+
+  # Если docker exec провалился, покажем диагностическую информацию
+  if [ $rc -ne 0 ] && { [[ "$out" == *"OCI runtime exec failed"* ]] || ! container_running; }; then
+    warn "[dexec] docker exec завершился с кодом $rc"
+    log "------ Статус контейнера ------"
+    docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 || true
+    log "------ Последние строки docker logs ------"
+    docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
+  fi
+
+  return $rc
 }
 
 container_running() {

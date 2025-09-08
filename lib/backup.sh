@@ -218,7 +218,7 @@ restore_backup_if_needed() {
       fi
 
       if [ "$cmd_rc" -eq 137 ]; then
-        warn "Команда gitlab-backup restore была прервана (код 137) — возможно нехватка памяти"
+        warn "Команда gitlab-backup restore была прервана (код 137) — процесс был убит"
         log "------ Свободная память хоста ------"
         free -h 2>&1 | sed -e 's/^/[host] /' >&2 || true
         if container_running; then
@@ -226,7 +226,15 @@ restore_backup_if_needed() {
           dexec 'free -h' 2>&1 | sed -e 's/^/[ctr] /' >&2 || true
         fi
         log "------ dmesg (последние строки) ------"
-        dmesg | tail -n 20 | sed -e 's/^/[dmesg] /' >&2 || true
+        local last_dmesg
+        last_dmesg=$(dmesg | tail -n 20)
+        printf '%s\n' "$last_dmesg" | sed -e 's/^/[dmesg] /' >&2 || true
+        if printf '%s' "$last_dmesg" | grep -qi 'Killed process'; then
+          err "Обнаружены признаки OOM: процесс был убит ядром. Увеличьте доступную RAM/Swap и запустите заново"
+          exit 1
+        else
+          warn "Признаков нехватки памяти не найдено — проверьте логи выше и состояние контейнера"
+        fi
       fi
 
       if ! container_running || [ "${rc_after:-0}" -gt "${rc_before:-0}" ]; then

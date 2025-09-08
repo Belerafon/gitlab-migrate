@@ -5,8 +5,10 @@ docker_ok() { docker info >/dev/null 2>&1; }
 
 # Use non-login shell to avoid TTY errors
 dexec() {
-  # Suppress TTY allocation errors
-  docker exec -i "$CONTAINER_NAME" bash -c "$1" 2>/dev/null | grep -v "mesg: ttyname failed" || true
+  local cmd="$1"
+  # Выводим stderr и убираем предупреждение mesg, сохраняя код возврата docker exec
+  docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1 | grep -v "mesg: ttyname failed"
+  return ${PIPESTATUS[0]}
 }
 
 container_running() {

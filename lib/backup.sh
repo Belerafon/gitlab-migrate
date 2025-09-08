@@ -151,15 +151,18 @@ restore_backup_if_needed() {
     log "[>] Попытка восстановления $restore_attempt/$max_attempts…"
     log "[i] Для мониторинга прогресса в реальном времени: tail -f ${rlog}"
 
-    local rc_before rc_after
+    local rc_before rc_after cmd_rc
     rc_before=$(container_restart_count)
 
-    # Improved restore command with progress tracking and TTY error suppression
-    if dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \${PIPESTATUS[0]}"; then
+    # Выполняем восстановление и сохраняем код возврата
+    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \${PIPESTATUS[0]}"
+    cmd_rc=$?
+    if [ $cmd_rc -eq 0 ]; then
       ok "Восстановление успешно завершено на попытке $restore_attempt"
+      log "[i] Код возврата gitlab-backup restore: $cmd_rc"
       break
     else
-      warn "Попытка $restore_attempt/$max_attempts завершилась ошибкой"
+      warn "Попытка $restore_attempt/$max_attempts завершилась ошибкой (код ${cmd_rc})"
       rc_after=$(container_restart_count)
 
       # Enhanced error diagnostics
@@ -169,6 +172,12 @@ restore_backup_if_needed() {
       # Show critical last 50 lines regardless of error patterns
       log "------ Последние 50 строк лога ------"
       dexec "tail -n 50 '${rlog}'" || true
+
+      # Дополнительные данные о состоянии контейнера
+      log "------ Статус контейнера ------"
+      docker ps -a --filter "name=$CONTAINER_NAME" || true
+      log "------ Последние строки docker logs ------"
+      docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
 
       if ! container_running || [ "${rc_after:-0}" -gt "${rc_before:-0}" ]; then
         warn "Обнаружен возможный рестарт/ступор контейнера (RestartCount ${rc_before}→${rc_after}). Делаю docker restart…"

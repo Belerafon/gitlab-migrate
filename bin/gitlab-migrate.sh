@@ -70,6 +70,17 @@ generate_migration_report() {
   log "\n=== КОНЕЦ ОТЧЕТА ==="
 }
 
+error_trap() {
+  warn "Ошибка на шаге. См. статус служб ниже:"
+  (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2
+  log "[status] ------ Последние строки docker logs ------"
+  docker logs --tail 20 "$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  log "[status] ------ Последние строки chef-client.log ------"
+  docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  log "[status] ------ Последние строки reconfigure.log ------"
+  docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 | sed -e "s/^/[status] /" >&2 || true
+}
+
 main() {
   for arg in "$@"; do
     case $arg in
@@ -159,6 +170,6 @@ main() {
   generate_migration_report
 }
 
-trap 'warn "Ошибка на шаге. См. статус служб ниже:"; (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2' ERR
+trap error_trap ERR
 
 main "$@"

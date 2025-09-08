@@ -179,8 +179,14 @@ restore_backup_if_needed() {
       log "------ Последние строки docker logs ------"
       docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
 
+      log "------ Последние строки chef-client.log ------"
+      docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 || true
+      log "------ Последние строки reconfigure.log ------"
+      docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 || true
+
       if ! container_running || [ "${rc_after:-0}" -gt "${rc_before:-0}" ]; then
-        warn "Обнаружен возможный рестарт/ступор контейнера (RestartCount ${rc_before}→${rc_after}). Делаю docker restart…"
+        warn "Обнаружен возможный рестарт/ступор контейнера (RestartCount ${rc_before}→${rc_after}). Запускаю update-permissions и перезапуск…"
+        docker exec -i "$CONTAINER_NAME" update-permissions >/dev/null 2>&1 || true
         docker restart "$CONTAINER_NAME" >/dev/null || true
         sleep "$WAIT_AFTER_START"
       fi

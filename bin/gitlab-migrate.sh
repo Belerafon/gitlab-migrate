@@ -89,8 +89,6 @@ error_trap() {
       | sed -e "s/^/[status] /" >&2 || true
   else
     log "[status] файл /var/log/gitlab/chef-client.log отсутствует"
-    docker exec -i "$CONTAINER_NAME" ls -l /var/log/gitlab 2>&1 \
-      | sed -e "s/^/[status] /" >&2 || true
   fi
 
   log "[status] ------ Последние строки reconfigure.log ------"
@@ -99,8 +97,6 @@ error_trap() {
       | sed -e "s/^/[status] /" >&2 || true
   else
     log "[status] файл /var/log/gitlab/reconfigure.log отсутствует"
-    docker exec -i "$CONTAINER_NAME" ls -l /var/log/gitlab 2>&1 \
-      | sed -e "s/^/[status] /" >&2 || true
   fi
 }
 
@@ -149,7 +145,11 @@ main() {
   wait_postgres_ready
 
   log "[>] Предварительная подготовка контейнера перед восстановлением (update-permissions)"
-  if dexec 'update-permissions'; then
+  local upd_out upd_rc
+  upd_out=$(dexec 'update-permissions' 2>&1)
+  upd_rc=$?
+  printf "%s\n" "$upd_out" | grep -Ev '^skipping, path does not exist' >&2 || true
+  if [ $upd_rc -eq 0 ]; then
     ok "update-permissions выполнен"
   else
     warn "update-permissions завершился с ошибкой"

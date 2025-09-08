@@ -17,6 +17,7 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/upgrade.sh"
 
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
+FORCE_CLEAN=0
 
 cleanup_previous_run() {
   if [ -f "$LOCK_FILE" ]; then
@@ -149,9 +150,11 @@ main() {
   for arg in "$@"; do
     case $arg in
       --reset|-r) reset_migration ;;
+      --clean|-c) FORCE_CLEAN=1 ;;
       --help|-h)
-        echo "Использование: $0 [--reset|-r] [--help|-h]"
+        echo "Использование: $0 [--reset|-r] [--clean|-c] [--help|-h]"
         echo "  --reset, -r  Сбросить миграцию и начать заново"
+        echo "  --clean, -c  Очистить каталоги /srv/gitlab без вопросов"
         echo "  --help,  -h  Показать эту справку"
         exit 0 ;;
     esac
@@ -188,6 +191,8 @@ main() {
 
   wait_gitlab_ready
   wait_postgres_ready
+  log "[>] Версия PostgreSQL в контейнере:"
+  dexec 'gitlab-psql --version 2>/dev/null || psql --version'
 
   log "[>] Предварительная подготовка контейнера перед восстановлением (update-permissions)"
   local upd_out upd_rc

@@ -191,6 +191,8 @@ restore_backup_if_needed() {
       # Show critical last 50 lines regardless of error patterns
       log "------ Последние 50 строк лога ------"
       dexec "tail -n 50 '${rlog}'" || true
+      log "------ Полный лог ${rlog} ------"
+      dexec "cat '${rlog}'" || true
       log "------ Проверка прав Postgres ------"
       dexec "ls -ld /var/opt/gitlab/postgresql /var/opt/gitlab/postgresql/data /var/opt/gitlab/postgresql/data/global" 2>&1 || true
       if dexec "test -e /var/opt/gitlab/postgresql/data/global/pg_filenode.map" >/dev/null 2>&1; then

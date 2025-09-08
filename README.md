@@ -25,6 +25,10 @@ nano /root/gitlab-migrate/conf/settings.env
 
 # 3) Запуск
 bash /root/gitlab-migrate/bin/gitlab-migrate.sh
+
+# 4) При наличии старых данных ответьте `y` на вопрос очистки — это эквивалент `--clean`
+#    или запустите сразу в неинтерактивном режиме:
+bash /root/gitlab-migrate/bin/gitlab-migrate.sh --clean
 ```
 
 ## Переезд до 17.x

@@ -172,7 +172,7 @@ restore_backup_if_needed() {
     # Выполняем восстановление и сохраняем код возврата
     trap - ERR
     set +e
-    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \\${PIPESTATUS[0]}"
+    dexec "set -o pipefail; umask 077; ( GITLAB_SKIP_UNMIGRATED_DB_VERSION_CHECK=1 time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \\${PIPESTATUS[0]}"
     cmd_rc=$?
     set -e
     trap error_trap ERR

@@ -1,0 +1,230 @@
+# lib/backup.sh
+find_latest_backup_in_src() {
+  local backup_files=()
+  for pattern in "*_gitlab_backup.tar" "*_gitlab_backup.tar.gz"; do
+    while IFS= read -r -d '' file; do
+      backup_files+=("$file")
+    done < <(find "$BACKUPS_SRC" -name "$pattern" -type f -print0 2>/dev/null | sort -z -r)
+  done
+  if [ ${#backup_files[@]} -gt 0 ]; then
+    printf "%s" "${backup_files[0]}"
+  else
+    return 1
+  fi
+}
+
+import_backup_and_config() {
+  [ "$(get_state IMPORT_DONE || true)" = "1" ] && { ok "IMPORT_DONE уже выполнен — пропускаю импорт"; return; }
+  [ -d "$BACKUPS_SRC" ] || { err "Не найден каталог $BACKUPS_SRC"; exit 1; }
+  local cfg="$BACKUPS_SRC/gitlab_config.tar"
+  [ -f "$cfg" ] || { err "Не найден $cfg"; exit 1; }
+  local bk; bk="$(find_latest_backup_in_src)"; [ -n "$bk" ] || { err "В $BACKUPS_SRC нет *_gitlab_backup.tar*"; exit 1; }
+
+  # Парсим TIMESTAMP и BASE_VER
+  local fname ts y m d base rest
+  fname="${bk##*/}"
+  IFS=_ read -r ts y m d base rest <<< "$fname"
+  [ -n "$ts" ] && [ -n "$base" ] || { err "Не удалось распарсить TIMESTAMP/BASE_VER из $fname"; exit 1; }
+
+  set_state BACKUP_FILE "$bk"
+  set_state BACKUP_TS   "$ts"
+  set_state BASE_VER    "$base"
+
+  mkdir -p "$DATA_ROOT/data/backups"
+  cp -a "$bk" "$DATA_ROOT/data/backups/"
+  log "[>] Распаковываю gitlab_config.tar → $DATA_ROOT"
+  tar -C "$DATA_ROOT" -xf "$cfg"   # создаст $DATA_ROOT/config
+  ok "Импортированы backup и конфиг"
+  set_state IMPORT_DONE 1
+}
+
+ensure_backup_present() {
+  local ts="$(get_state BACKUP_TS || true)" bk_srv
+  bk_srv=$(ls -1 "$DATA_ROOT/data/backups/${ts}_"*_gitlab_backup.tar* 2>/dev/null | head -n1 || true)
+  if [ -z "$bk_srv" ]; then
+    warn "В /srv нет файла бэкапа TS=${ts}. Пробую скопировать из $BACKUPS_SRC…"
+    local bk_src
+    bk_src="$(find_latest_backup_in_src)"
+    [ -n "$bk_src" ] || { err "В $BACKUPS_SRC нет *_gitlab_backup.tar*"; exit 1; }
+
+    if [ -z "$ts" ]; then
+      local fname2 ts2 y m d base
+      fname2="${bk_src##*/}"
+      IFS=_ read -r ts2 y m d base _ <<< "$fname2"
+      set_state BACKUP_TS "$ts2"
+      [ -z "$(get_state BASE_VER || true)" ] && set_state BASE_VER "$base"
+      ts="$ts2"
+    fi
+
+    mkdir -p "$DATA_ROOT/data/backups"
+    cp -a "$bk_src" "$DATA_ROOT/data/backups/"
+    ok "Скопировал $(basename "$bk_src") в $DATA_ROOT/data/backups/"
+  fi
+}
+
+# Создаём ТОЛЬКО корректное «каноническое» имя под реальное расширение
+normalize_backup_name() {
+  local ts dir_host real ext
+  ts="$(get_state BACKUP_TS)"; dir_host="$DATA_ROOT/data/backups"
+  real=$(ls -1 "$dir_host/${ts}_"*_gitlab_backup.tar* 2>/dev/null | head -n1 || true)
+  [ -z "$real" ] && { err "Не найден файл $dir_host/${ts}_*_gitlab_backup.tar*"; exit 1; }
+  if [[ "$real" == *.tar.gz ]]; then ext=".tar.gz"; else ext=".tar"; fi
+  local canon="$dir_host/${ts}_gitlab_backup${ext}"
+  if [ "$real" != "$canon" ]; then
+    ln -f "$real" "$canon" 2>/dev/null || cp -a "$real" "$canon"
+  fi
+  set_state BACKUP_CANON "$canon"
+  ok "Нормализовано имя бэкапа: $(basename "$canon")"
+}
+
+fix_owners() {
+  local UIDG U G
+  UIDG=$(dexec 'printf "%s:%s" "$(id -u git)" "$(id -g git)"' 2>/dev/null || echo "998:998")
+  UIDG=$(printf "%s" "$UIDG" | tr -d '\n')
+  U=${UIDG%%:*}
+  G=${UIDG##*:}
+  chown -R root:root "$DATA_ROOT/config"
+  chown -R "$U:$G" "$DATA_ROOT/data" "$DATA_ROOT/logs"
+  chmod 700 "$DATA_ROOT/data/backups" 2>/dev/null || true
+  chmod 600 "$DATA_ROOT/data/backups"/*gitlab_backup.tar* 2>/dev/null || true
+  ok "Права на каталоги выровнены (git uid:gid = $U:$G)"
+}
+
+restore_backup_if_needed() {
+  local done ts canon ext container_backup_file
+  ts="$(get_state BACKUP_TS)"
+  done="$(get_state RESTORED_TS || true)"
+  [ "$done" = "$ts" ] && { ok "Бэкап уже восстановлен (TS=$done) — пропускаю"; return; }
+
+  ensure_backup_present
+  normalize_backup_name
+  canon="$(get_state BACKUP_CANON)"
+  [[ "$canon" == *.tar.gz ]] && ext=".tar.gz" || ext=".tar"
+  container_backup_file="/var/opt/gitlab/backups/${ts}_gitlab_backup${ext}"
+
+  log "[>] Проверка валидности backup файла…"
+  log "[>] Путь к backup файлу (host): ${canon}"
+  log "[>] Путь к backup файлу (container): ${container_backup_file}"
+  log "[>] Размер backup файла: $(stat -c%s "${canon}" 2>/dev/null || echo "n/a")"
+  log "[>] Права на backup файл: $(stat -c%A "${canon}" 2>/dev/null || echo "n/a")"
+  log "[>] Владелец файла: $(stat -c%U "${canon}" 2>/dev/null || echo "n/a")"
+  log "[>] Группа файла: $(stat -c%G "${canon}" 2>/dev/null || echo "n/a")"
+
+  log "[>] Проверка доступности backup файла в контейнере…"
+  dexec "ls -la '${container_backup_file}'" >/dev/null || { err "Backup файл недоступен в контейнере: ${container_backup_file}"; exit 1; }
+
+  log "[>] Проверка свободного места в контейнере…"
+  dexec "df -h /var/opt/gitlab" || true
+
+  if [[ "${container_backup_file}" == *.tar.gz ]]; then
+    log "[>] Проверка gzip архива…"
+    dexec "gunzip -t '${container_backup_file}'" || { err "Backup файл повреждён (gzip test failed)"; exit 1; }
+    log "[>] Проверка tar архива…"
+    dexec "tar -ztvf '${container_backup_file}' >/dev/null" || { err "Backup файл повреждён (tar zt failed)"; exit 1; }
+  else
+    log "[>] Проверка tar архива…"
+    dexec "tar -tvf '${container_backup_file}'  >/dev/null" || { err "Backup файл повреждён (tar t failed)"; exit 1; }
+  fi
+
+  log "[>] Проверка готовности всех служб перед восстановлением…"
+  wait_gitlab_ready
+  wait_postgres_ready
+
+  fix_owners
+
+  log "[>] Проверка свободного места перед восстановлением…"
+  dexec "df -h /var/opt/gitlab" || true
+  local available_space
+  available_space=$(dexec "df -BG --output=avail /var/opt/gitlab | tail -1 | tr -dc '0-9'" || echo "0")
+  if [ "${available_space:-0}" -lt 5 ]; then
+    err "Недостаточно свободного места: ${available_space}G доступно, требуется минимум 5G"; exit 1
+  fi
+
+  local rlog="/var/log/gitlab/restore_${ts}.log"
+  local restore_attempt=1 max_attempts=3
+
+  while [ $restore_attempt -le $max_attempts ]; do
+    log "[>] Восстановление BACKUP=$ts (подробный лог: ${rlog})…"
+    log "[>] Попытка восстановления $restore_attempt/$max_attempts…"
+    log "[i] Для мониторинга прогресса в реальном времени: tail -f ${rlog}"
+
+    local rc_before rc_after
+    rc_before=$(container_restart_count)
+
+    # Improved restore command with progress tracking and TTY error suppression
+    if dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \${PIPESTATUS[0]}"; then
+      ok "Восстановление успешно завершено на попытке $restore_attempt"
+      break
+    else
+      warn "Попытка $restore_attempt/$max_attempts завершилась ошибкой"
+      rc_after=$(container_restart_count)
+
+      # Enhanced error diagnostics
+      log "------ Ошибки из ${rlog} (полный контекст) ------"
+      dexec "grep -nE 'ERROR|FATAL|rake aborted|tar:|Permission denied|No space left|No such file|Database.*version|PG::|invalid' '${rlog}' -B 5 -A 5 | tail -n 100" || true
+
+      # Show critical last 50 lines regardless of error patterns
+      log "------ Последние 50 строк лога ------"
+      dexec "tail -n 50 '${rlog}'" || true
+
+      if ! container_running || [ "${rc_after:-0}" -gt "${rc_before:-0}" ]; then
+        warn "Обнаружен возможный рестарт/ступор контейнера (RestartCount ${rc_before}→${rc_after}). Делаю docker restart…"
+        docker restart "$CONTAINER_NAME" >/dev/null || true
+        sleep "$WAIT_AFTER_START"
+      fi
+
+      wait_gitlab_ready
+      wait_postgres_ready
+
+      if [ $restore_attempt -eq $max_attempts ]; then
+        # More detailed final error message
+        err "Восстановление завершилось с ошибкой после $max_attempts попыток. Проверьте полный лог: ${rlog}";
+        exit 1
+      else
+        warn "Повторю попытку через 30 секунд…"; sleep 30
+        restore_attempt=$((restore_attempt+1))
+      fi
+    fi
+  done
+
+  dexec 'gitlab-ctl reconfigure' || true
+  dexec 'gitlab-ctl restart'     || true
+
+  set_state RESTORED_TS "$ts"
+  ok "Восстановление завершено"
+}
+
+verify_restore_success() {
+  log "[>] Запускаю все службы после восстановления…"
+  dexec 'gitlab-ctl start' || true
+  sleep 30
+  wait_gitlab_ready
+  wait_postgres_ready
+
+  log "[>] Проверка миграций после восстановления…"
+  dexec 'gitlab-rake db:migrate:status | tail -n +1' || true
+
+  log "[>] Проверка состояния базы данных…"
+  local project_count
+  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  if [ "${project_count:-0}" -gt 0 ]; then
+    ok "База данных содержит ${project_count} проектов"
+  else
+    warn "База данных пуста или недоступна"
+  fi
+
+  log "[>] Проверка веб‑интерфейса…"
+  local http_status
+  http_status=$(dexec 'curl -s -o /dev/null -w "%{http_code}" http://localhost/-/health 2>/dev/null || echo "000"')
+  if [ "$http_status" = "200" ]; then
+    ok "Веб‑интерфейс доступен (HTTP 200)"
+  else
+    warn "Веб‑интерфейс недоступен или возвращает код $http_status"
+  fi
+
+  log "[>] Проверка фоновых миграций…"
+  dexec 'gitlab-rake gitlab:background_migrations:status' || true
+
+  ok "Восстановление проверено"
+  set_state RESTORE_DONE 1
+}

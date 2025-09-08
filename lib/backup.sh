@@ -308,7 +308,14 @@ verify_restore_success() {
   fi
 
   log "[>] Проверка миграций после восстановления…"
-  dexec 'gitlab-rake db:migrate:status | tail -n +1' || true
+  local pending_migrations
+  pending_migrations=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null | grep -E '^\s*down' || true)
+  if [ -n "$pending_migrations" ]; then
+    warn "Найдены незапущенные миграции:"
+    printf '%s\n' "$pending_migrations"
+  else
+    ok "Все миграции применены"
+  fi
 
   log "[>] Проверка состояния базы данных…"
   local project_count user_count issue_count

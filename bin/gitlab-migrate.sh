@@ -99,7 +99,7 @@ error_trap() {
   log "[status] ------ Статус контейнера ------"
   docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true
   log "[status] ------ Docker inspect (state) ------"
-  docker inspect -f 'State: {{.State.Status}}, Exit: {{.State.ExitCode}}, Restarts: {{.RestartCount}}' "$CONTAINER_NAME" 2>&1 \
+  docker inspect -f 'State: {{.State.Status}}, Exit: {{.State.ExitCode}}, OOMKilled: {{.State.OOMKilled}}, Restarts: {{.RestartCount}}' "$CONTAINER_NAME" 2>&1 \
     | sed -e "s/^/[status] /" >&2 || true
 
   log "[status] ------ Последние строки docker logs ------"
@@ -119,6 +119,24 @@ error_trap() {
       | sed -e "s/^/[status] /" >&2 || true
   else
     log "[status] файл /var/log/gitlab/reconfigure.log отсутствует"
+  fi
+
+  log "[status] ------ Свободная память хоста ------"
+  free -h 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  if container_running; then
+    log "[status] ------ Свободная память контейнера ------"
+    dexec 'free -h' 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  fi
+
+  log "[status] ------ dmesg (последние строки) ------"
+  dmesg | tail -n 20 | sed -e "s/^/[status] /" >&2 || true
+
+  local ts
+  ts=$(get_state BACKUP_TS || true)
+  if [ -n "$ts" ] && docker exec -i "$CONTAINER_NAME" test -f "/var/log/gitlab/restore_${ts}.log" >/dev/null 2>&1; then
+    log "[status] ------ Последние строки restore_${ts}.log ------"
+    docker exec -i "$CONTAINER_NAME" tail -n 20 "/var/log/gitlab/restore_${ts}.log" 2>&1 \
+      | sed -e "s/^/[status] /" >&2 || true
   fi
 }
 

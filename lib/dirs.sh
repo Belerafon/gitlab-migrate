@@ -4,12 +4,13 @@ ensure_dirs() {
   if [ -n "$(ls -A "$DATA_ROOT/config" 2>/dev/null || true)" ] \
   || [ -n "$(ls -A "$DATA_ROOT/data" 2>/dev/null || true)" ] \
   || [ -n "$(ls -A "$DATA_ROOT/logs" 2>/dev/null || true)" ]; then
-    if ask_yes_no "Найдены существующие каталоги в $DATA_ROOT. Пересоздать (удалить содержимое)?" "n"; then
+    if [ "${FORCE_CLEAN:-0}" -eq 1 ] || ask_yes_no "Найдены существующие каталоги в $DATA_ROOT. Пересоздать (удалить содержимое)?" "n"; then
       docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
       rm -rf "$DATA_ROOT" 2>/dev/null || true
       mkdir -p "$DATA_ROOT"/{config,data,logs}
       ok "Каталоги пересозданы"
       state_clear
+      FORCE_CLEAN=1
     else
       ok "Сохраняю существующие каталоги."
     fi

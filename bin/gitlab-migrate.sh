@@ -192,23 +192,7 @@ main() {
   wait_gitlab_ready
   wait_postgres_ready
   log "[>] Версия PostgreSQL в контейнере:"
-  dexec 'gitlab-psql --version 2>/dev/null || psql --version'
-
-  log "[>] Предварительная подготовка контейнера перед восстановлением (update-permissions)"
-  local upd_out upd_rc
-  upd_out=$(dexec 'update-permissions' 2>&1)
-  upd_rc=$?
-  if [ $upd_rc -eq 0 ]; then
-    ok "update-permissions выполнен"
-  else
-    printf "%s\n" "$upd_out" | grep -Ev '^\+|^skipping, path does not exist' >&2 || true
-    warn "update-permissions завершился с ошибкой (код $upd_rc)"
-  fi
-  docker restart "$CONTAINER_NAME" >/dev/null || true
-  sleep "$WAIT_AFTER_START"
-
-  wait_gitlab_ready
-  wait_postgres_ready
+  dexec 'gitlab-psql --version 2>/dev/null || psql --version' || true
 
   restore_backup_if_needed
 

@@ -144,9 +144,8 @@ restore_backup_if_needed() {
 
   fix_owners
   dexec 'update-permissions' >/dev/null 2>&1 || warn "update-permissions после fix_owners завершился с ошибкой"
-  log "[>] Перезапуск контейнера после update-permissions…"
-  docker restart "$CONTAINER_NAME" >/dev/null || true
-  sleep "$WAIT_AFTER_START"
+  log "[>] Применение новых прав (gitlab-ctl reconfigure)…"
+  dexec 'gitlab-ctl reconfigure >/dev/null 2>&1' || true
   wait_gitlab_ready
   wait_postgres_ready
 

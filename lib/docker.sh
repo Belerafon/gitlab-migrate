@@ -1,4 +1,5 @@
 # lib/docker.sh
+# shellcheck shell=bash
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
 docker_ok() { docker info >/dev/null 2>&1; }
@@ -66,6 +67,18 @@ run_container() {
   local image="$1"
   log "[>] Запуск контейнера ${CONTAINER_NAME} c образом ${image}"
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  log "[>] Предварительное выравнивание прав (update-permissions)…"
+  # Скрипт update-permissions входит в образ GitLab и использует его встроенные утилиты
+  # (например, для вычисления UID/GID и исправления множества путей). Запускать его
+  # напрямую с хоста сложно: придётся тащить весь необходимый стек. Поэтому мы
+  # запускаем короткоживущий контейнер, который выполняет update-permissions в
+  # «родной» среде перед стартом основного инстанса.
+  docker run --rm \
+    -v "$DATA_ROOT/config:/etc/gitlab" \
+    -v "$DATA_ROOT/data:/var/opt/gitlab" \
+    -v "$DATA_ROOT/logs:/var/log/gitlab" \
+    gitlab/gitlab-ce:"$image" update-permissions >/dev/null 2>&1 \
+    || warn "update-permissions завершился с ошибкой"
   docker run -d --name "$CONTAINER_NAME" --restart=always \
     -p "$HOST_IP:$PORT_SSH:22" -p "$HOST_IP:$PORT_HTTPS:443" -p "$HOST_IP:$PORT_HTTP:80" \
     -v "$DATA_ROOT/config:/etc/gitlab" \

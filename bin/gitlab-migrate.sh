@@ -148,11 +148,11 @@ main() {
   local upd_out upd_rc
   upd_out=$(dexec 'update-permissions' 2>&1)
   upd_rc=$?
-  printf "%s\n" "$upd_out" | grep -Ev '^skipping, path does not exist' >&2 || true
   if [ $upd_rc -eq 0 ]; then
     ok "update-permissions выполнен"
   else
-    warn "update-permissions завершился с ошибкой"
+    printf "%s\n" "$upd_out" | grep -Ev '^\+|^skipping, path does not exist' >&2 || true
+    warn "update-permissions завершился с ошибкой (код $upd_rc)"
   fi
   docker restart "$CONTAINER_NAME" >/dev/null || true
   sleep "$WAIT_AFTER_START"

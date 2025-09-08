@@ -200,14 +200,36 @@ restore_backup_if_needed() {
       docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
 
       log "------ Последние строки chef-client.log ------"
-      docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 || true
+      if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
+        docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 || true
+      else
+        log "файл /var/log/gitlab/chef-client.log отсутствует"
+      fi
       log "------ Последние строки reconfigure.log ------"
-      docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 || true
+      if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/reconfigure.log >/dev/null 2>&1; then
+        docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 || true
+      else
+        log "файл /var/log/gitlab/reconfigure.log отсутствует"
+      fi
+
+      if [ "$cmd_rc" -eq 137 ]; then
+        warn "Команда gitlab-backup restore была прервана (код 137) — возможно нехватка памяти"
+        log "------ Свободная память хоста ------"
+        free -h 2>&1 | sed -e 's/^/[host] /' >&2 || true
+        if container_running; then
+          log "------ Свободная память контейнера ------"
+          dexec 'free -h' 2>&1 | sed -e 's/^/[ctr] /' >&2 || true
+        fi
+        log "------ dmesg (последние строки) ------"
+        dmesg | tail -n 20 | sed -e 's/^/[dmesg] /' >&2 || true
+      fi
 
       if ! container_running || [ "${rc_after:-0}" -gt "${rc_before:-0}" ]; then
         warn "Обнаружен возможный рестарт/ступор контейнера (RestartCount ${rc_before}→${rc_after}). Запускаю update-permissions и перезапуск…"
         docker exec -i "$CONTAINER_NAME" update-permissions >/dev/null 2>&1 || true
         docker restart "$CONTAINER_NAME" >/dev/null || true
+        sleep "$WAIT_AFTER_START"
+        docker exec -i "$CONTAINER_NAME" gitlab-ctl reconfigure >/dev/null 2>&1 || true
         sleep "$WAIT_AFTER_START"
       fi
 

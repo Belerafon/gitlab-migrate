@@ -6,7 +6,7 @@ ensure_dirs() {
   || [ -n "$(ls -A "$DATA_ROOT/logs" 2>/dev/null || true)" ]; then
     if ask_yes_no "Найдены существующие каталоги в $DATA_ROOT. Пересоздать (удалить содержимое)?" "n"; then
       docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-      rm -rf "$DATA_ROOT"/{config,data,logs}
+      rm -rf "$DATA_ROOT" 2>/dev/null || true
       mkdir -p "$DATA_ROOT"/{config,data,logs}
       ok "Каталоги пересозданы"
       state_clear

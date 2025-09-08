@@ -242,10 +242,27 @@ verify_restore_success() {
     fi
   done
 
-  # Exit if any critical service is down
+  # Если критические службы не запущены, пытаемся автоматический recovery
   if [ $service_ok -eq 0 ]; then
-    err "Критические службы не запустились после восстановления"
-    exit 1
+    warn "Критические службы не запустились — выполняю reconfigure и restart"
+    dexec 'gitlab-ctl reconfigure' || true
+    dexec 'gitlab-ctl restart'     || true
+    sleep 30
+
+    service_ok=1
+    for service in "${services[@]}"; do
+      if dexec "gitlab-ctl status ${service} | grep -q 'run:'"; then
+        ok "Служба $service запущена"
+      else
+        warn "Служба $service не запустилась после reconfigure"
+        service_ok=0
+      fi
+    done
+
+    if [ $service_ok -eq 0 ]; then
+      err "Критические службы не запустились даже после reconfigure"
+      exit 1
+    fi
   fi
 
   log "[>] Проверка миграций после восстановления…"

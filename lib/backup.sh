@@ -155,8 +155,10 @@ restore_backup_if_needed() {
     rc_before=$(container_restart_count)
 
     # Выполняем восстановление и сохраняем код возврата
+    set +e
     dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}'; exit \${PIPESTATUS[0]}"
     cmd_rc=$?
+    set -e
     if [ $cmd_rc -eq 0 ]; then
       ok "Восстановление успешно завершено на попытке $restore_attempt"
       log "[i] Код возврата gitlab-backup restore: $cmd_rc"

@@ -133,6 +133,24 @@ wait_postgres_ready() {
   ok "PostgreSQL готов"
 }
 
+wait_container_health() {
+  log "[>] Проверяю healthcheck контейнера…"
+  local waited=0 status
+  while container_running; do
+    status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+    if [ "$status" = "healthy" ] || [ "$status" = "none" ]; then
+      ok "Контейнер в состоянии $status"
+      return 0
+    fi
+    sleep 3; waited=$((waited+3))
+    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
+      warn "Контейнер не перешёл в состояние healthy за ${READY_TIMEOUT}s (статус: $status)"
+      return 0
+    fi
+  done
+  warn "Контейнер не запущен"
+}
+
 # New function to wait for upgrade completion with timeout
 wait_upgrade_completion() {
   local timeout=$((60 * 30)) # 30 minutes timeout

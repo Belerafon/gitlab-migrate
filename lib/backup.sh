@@ -102,6 +102,39 @@ fix_owners() {
   ok "Права на каталоги выровнены (git uid:gid = $U_GIT:$G_GIT, gitlab-psql uid:gid = $U_PSQL:$G_PSQL)"
 }
 
+check_backup_versions() {
+  local canon bk_ver bk_db cur_ver cur_db tmp
+  canon="$(get_state BACKUP_CANON || true)"
+  [ -f "$canon" ] || { warn "Не найден backup файл для проверки версий"; return; }
+
+  log "[>] Проверка метаданных бэкапа…"
+  tmp="$(mktemp)"
+  if tar -xf "$canon" backup_information.yml -O >"$tmp" 2>/dev/null; then
+    bk_ver=$(grep '^gitlab_version:' "$tmp" | awk '{print $2}')
+    bk_db=$(grep '^db_version:' "$tmp" | awk '{print $2}')
+    log "  - GitLab в бэкапе: ${bk_ver:-unknown}"
+    log "  - PostgreSQL в бэкапе: ${bk_db:-unknown}"
+  else
+    warn "Не удалось извлечь backup_information.yml из $(basename "$canon")"
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+
+  cur_ver=$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')
+  cur_db=$(dexec 'gitlab-psql --version 2>/dev/null || true' | awk '{print $3}' | tr -d '\n')
+  log "  - GitLab в контейнере: ${cur_ver:-unknown}"
+  log "  - PostgreSQL в контейнере: ${cur_db:-unknown}"
+
+  if [ -n "$bk_ver" ] && [ "$bk_ver" != "$cur_ver" ]; then
+    warn "Версия GitLab бэкапа (${bk_ver}) отличается от версии контейнера (${cur_ver})"
+  fi
+  if [ -n "$bk_db" ] && [ "$bk_db" != "$cur_db" ]; then
+    warn "Версия PostgreSQL бэкапа (${bk_db}) отличается от версии контейнера (${cur_db})"
+  fi
+
+  log "[>] Сводка окружения контейнера:"
+  dexec 'gitlab-rake gitlab:env:info' || true
+}
+
 restore_backup_if_needed() {
   local done ts canon ext container_backup_file
   ts="$(get_state BACKUP_TS)"
@@ -141,6 +174,8 @@ restore_backup_if_needed() {
   log "[>] Проверка готовности всех служб перед восстановлением…"
   wait_gitlab_ready
   wait_postgres_ready
+  wait_container_health
+  check_backup_versions
 
   fix_owners
   dexec 'touch /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true

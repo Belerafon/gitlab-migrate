@@ -79,7 +79,10 @@ run_container() {
     -v "$DATA_ROOT/logs:/var/log/gitlab" \
     gitlab/gitlab-ce:"$image" update-permissions >/dev/null 2>&1 \
     || warn "update-permissions завершился с ошибкой"
+  # Отключаем авто-миграции до восстановления
+  touch "$DATA_ROOT/data/skip-auto-migrations" 2>/dev/null || true
   docker run -d --name "$CONTAINER_NAME" --restart=always \
+    -e GITLAB_SKIP_DATABASE_MIGRATION=1 \
     -p "$HOST_IP:$PORT_SSH:22" -p "$HOST_IP:$PORT_HTTPS:443" -p "$HOST_IP:$PORT_HTTP:80" \
     -v "$DATA_ROOT/config:/etc/gitlab" \
     -v "$DATA_ROOT/data:/var/opt/gitlab" \

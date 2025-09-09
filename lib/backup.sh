@@ -103,19 +103,32 @@ fix_owners() {
 }
 
 check_backup_versions() {
-  local canon bk_ver bk_db cur_ver cur_db tmp
+  local canon bk_ver bk_db cur_ver cur_db tmp container_backup
   canon="$(get_state BACKUP_CANON || true)"
   [ -f "$canon" ] || { warn "Не найден backup файл для проверки версий"; return; }
+  container_backup="/var/opt/gitlab/backups/$(basename "$canon")"
 
   log "[>] Проверка метаданных бэкапа…"
   tmp="$(mktemp)"
   if tar -xf "$canon" backup_information.yml -O >"$tmp" 2>/dev/null; then
-    bk_ver=$(grep '^gitlab_version:' "$tmp" | awk '{print $2}')
-    bk_db=$(grep '^db_version:' "$tmp" | awk '{print $2}')
+    bk_ver=$(grep '^gitlab_version:' "$tmp" | awk '{print $2}' || true)
+    bk_db=$(grep '^db_version:' "$tmp" | awk '{print $2}' || true)
     log "  - GitLab в бэкапе: ${bk_ver:-unknown}"
     log "  - PostgreSQL в бэкапе: ${bk_db:-unknown}"
+    if [ -z "$bk_ver" ] || [ -z "$bk_db" ]; then
+      warn "Отсутствуют метаданные в backup_information.yml"
+      log "  - Путь к архиву (host): $canon"
+      log "  - Путь к архиву (container): $container_backup"
+      log "  - Содержимое backup_information.yml (host):"
+      sed 's/^/    | /' "$tmp" || true
+      log "  - Содержимое backup_information.yml (container):"
+      dexec "tar -xf '$container_backup' backup_information.yml -O" 2>/dev/null | sed 's/^/    | /' || warn "Не удалось извлечь backup_information.yml из контейнера"
+    fi
   else
     warn "Не удалось извлечь backup_information.yml из $(basename "$canon")"
+    log "  - Путь к архиву (host): $canon"
+    log "  - Содержимое архива (первые 50 строк):"
+    tar -tvf "$canon" 2>&1 | head -n50 | sed 's/^/    | /'
   fi
   rm -f "$tmp" 2>/dev/null || true
 

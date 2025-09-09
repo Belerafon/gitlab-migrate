@@ -186,7 +186,9 @@ restore_backup_if_needed() {
 
       # Enhanced error diagnostics
       log "------ Ошибки из ${rlog} (полный контекст) ------"
-      dexec "grep -nE 'ERROR|FATAL|rake aborted|tar:|Permission denied|No space left|No such file|Database.*version|PG::|invalid' '${rlog}' -B 5 -A 5 | tail -n 100" || true
+      if ! dexec "grep -nE 'ERROR|FATAL|rake aborted|tar:|Permission denied|No space left|No such file|Database.*version|PG::|invalid' '${rlog}' -B 5 -A 5 | tail -n 100"; then
+        log "(подходящих строк не найдено)"
+      fi
 
       # Show critical last 50 lines regardless of error patterns
       log "------ Последние 50 строк лога ------"

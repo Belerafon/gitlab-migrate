@@ -143,6 +143,7 @@ restore_backup_if_needed() {
   wait_postgres_ready
 
   fix_owners
+  dexec 'touch /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true
   dexec 'update-permissions' >/dev/null 2>&1 || warn "update-permissions после fix_owners завершился с ошибкой"
   log "[>] Применение новых прав (gitlab-ctl reconfigure)…"
   dexec 'gitlab-ctl reconfigure >/dev/null 2>&1' || true
@@ -267,8 +268,9 @@ restore_backup_if_needed() {
     fi
   done
 
-  dexec 'gitlab-ctl reconfigure' || true
-  dexec 'gitlab-ctl restart'     || true
+  dexec 'rm -f /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true
+  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
+  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl restart'     || true
 
   set_state RESTORED_TS "$ts"
   ok "Восстановление завершено"
@@ -307,7 +309,7 @@ verify_restore_success() {
   # Если критические службы не запущены, пытаемся автоматический recovery
   if [ $service_ok -eq 0 ]; then
     warn "Критические службы не запустились — выполняю reconfigure и restart"
-    dexec 'gitlab-ctl reconfigure' || true
+    dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
     dexec 'gitlab-ctl restart'     || true
     sleep 30
 

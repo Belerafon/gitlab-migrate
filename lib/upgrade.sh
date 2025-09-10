@@ -39,14 +39,13 @@ upgrade_to_series() {
     wait_upgrade_completion
   
     log "[>] Проверка миграций схемы:"
-    local ms_output down_lines up_count down_count
+    local ms_output up_count down_count
     ms_output=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null || true)
-    down_lines=$(printf '%s\n' "$ms_output" | grep -E '^\s*down' || true)
     up_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*up' || true)
     down_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*down' || true)
 
-    if [ -n "$down_lines" ]; then
-      printf '%s\n' "$down_lines" | sed 's/^/  /'
+    if [ "$down_count" -gt 0 ]; then
+      log "  есть неприменённые миграции"
     else
       log "  все миграции применены"
     fi

@@ -56,7 +56,7 @@ upgrade_to_series() {
     if [[ "$current_base" != "$target_base" ]]; then
       warn "Версия после апгрейда не соответствует ожидаемой: $current_version != $target"
       log "[>] Попытка повторного запуска служб..."
-      dexec 'gitlab-ctl restart' || true
+      dexec 'gitlab-ctl restart >/dev/null 2>&1' || true
       sleep "$WAIT_AFTER_START"
       wait_gitlab_ready
       wait_postgres_ready

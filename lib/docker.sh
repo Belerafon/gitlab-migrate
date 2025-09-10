@@ -116,7 +116,7 @@ wait_postgres_ready() {
     sleep 3; waited=$((waited+3))
     if [ "$waited" -ge "$READY_TIMEOUT" ]; then
       warn "PostgreSQL не поднялся за ${READY_TIMEOUT}s — запускаю reconfigure и продолжаю ждать"
-      dexec 'gitlab-ctl reconfigure || true'
+      dexec 'gitlab-ctl reconfigure >/dev/null 2>&1 || true'
       waited=0
     fi
   done
@@ -188,6 +188,6 @@ wait_upgrade_completion() {
   done
 
   warn "Апгрейд не завершился за 30 минут. Пытаюсь перезапустить..."
-  dexec 'gitlab-ctl restart' || true
+  dexec 'gitlab-ctl restart >/dev/null 2>&1' || true
   sleep 60
 }

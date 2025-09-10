@@ -111,8 +111,8 @@ check_backup_versions() {
   log "[>] Проверка метаданных бэкапа…"
   tmp="$(mktemp)"
   if tar -xf "$canon" backup_information.yml -O >"$tmp" 2>/dev/null; then
-    bk_ver=$(grep '^:gitlab_version:' "$tmp" | awk '{print $2}' || true)
-    bk_db=$(grep '^:db_version:' "$tmp" | awk '{print $2}' || true)
+    bk_ver=$(grep '^:gitlab_version:' "$tmp" | awk '{print $2}' | tr -d "'\"[:space:]" || true)
+    bk_db=$(grep '^:db_version:' "$tmp" | awk '{print $2}' | tr -d "'\"[:space:]" || true)
     log "  - GitLab в бэкапе: ${bk_ver:-unknown}"
     log "  - Версия схемы БД в бэкапе: ${bk_db:-unknown}"
     if [ -z "$bk_ver" ] || [ -z "$bk_db" ]; then

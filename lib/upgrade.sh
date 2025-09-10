@@ -6,6 +6,7 @@ latest_patch_tag() {
   # Hardcoded mapping for known series to their latest patch versions
   case "$series" in
     "13.12") echo "13.12.15-ce.0" ;;
+    "14.0")  echo "14.0.12-ce.0" ;;
     "14.10") echo "14.10.5-ce.0" ;;
     "15.11") echo "15.11.13-ce.0" ;;
     "16.11") echo "16.11.3-ce.0" ;;
@@ -14,7 +15,14 @@ latest_patch_tag() {
   esac
 }
 
-compute_stops() { echo "13.12"; echo "14.10"; echo "15.11"; echo "16.11"; [ "$DO_TARGET_17" = "yes" ] && echo "17"; }
+compute_stops() {
+  echo "13.12"
+  echo "14.0"
+  echo "14.10"
+  echo "15.11"
+  echo "16.11"
+  [ "$DO_TARGET_17" = "yes" ] && echo "17"
+}
 
 upgrade_to_series() {
   local series="$1" target

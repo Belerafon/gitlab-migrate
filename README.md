@@ -14,6 +14,8 @@ gitlab-migrate/
   lib/backup.sh                  # Импорт, проверка и восстановление бэкапа
   lib/upgrade.sh                 # «Лестница» версий
 ```
+
+Скрипт поднимает GitLab через обязательные промежуточные релизы: 13.12.x → 14.0.x → 14.10.x → 15.11.x → 16.11.x (и опционально 17.x).
     
 ## Быстрый старт
 ```bash
@@ -30,6 +32,8 @@ bash /root/gitlab-migrate/bin/gitlab-migrate.sh
 #    или запустите сразу в неинтерактивном режиме:
 bash /root/gitlab-migrate/bin/gitlab-migrate.sh --clean
 ```
+
+В каталоге, указанном в `BACKUPS_SRC`, должны находиться архив бэкапа `*_gitlab_backup.tar*` и файл `gitlab_config.tar` с `gitlab.rb` и `gitlab-secrets.json`.
 
 ## Переезд до 17.x
 В конфиге `conf/settings.env` поставьте `DO_TARGET_17="yes"` и повторно запустите точку входа.

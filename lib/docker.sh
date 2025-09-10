@@ -54,6 +54,7 @@ latest_patch_tag() {
   local series="$1" tag=""
   case "$series" in
     13.12) tag="13.12.15-ce.0" ;;
+    14.0)  tag="14.0.12-ce.0"  ;;
     14.10) tag="14.10.5-ce.0"  ;;
     15.11) tag="15.11.13-ce.0" ;;
     16.11) tag="16.11.8-ce.0"  ;;

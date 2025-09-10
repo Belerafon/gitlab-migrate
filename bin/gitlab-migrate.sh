@@ -100,6 +100,8 @@ generate_migration_report() {
 }
 
 error_trap() {
+  trap - ERR
+  set +e
   warn "Ошибка на шаге. См. статус служб ниже:"
   (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2
 
@@ -112,12 +114,13 @@ error_trap() {
   local dlog
   dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
   log "[status] ------ Ошибки из docker logs ------"
-  printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed|It is required to upgrade to the latest' | sed -e "s/^/[status] /" >&2 || true
+  printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed|It is required to upgrade to the latest' \
+    | awk '!seen[$0]++' | sed -e "s/^/[status] /" >&2 || true
   if printf '%s\n' "$dlog" | grep -q 'It is required to upgrade to the latest 14.0.x version first'; then
     warn "[status] Обнаружено требование предварительного обновления до 14.0.x"
   fi
   log "[status] ------ Последние строки docker logs ------"
-  printf '%s\n' "$dlog" | sed -e "s/^/[status] /" >&2 || true
+  printf '%s\n' "$dlog" | tail -n 40 | awk '!seen[$0]++' | sed -e "s/^/[status] /" >&2 || true
 
   log "[status] ------ Последние строки chef-client.log ------"
   if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
@@ -159,6 +162,7 @@ error_trap() {
     docker exec -i "$CONTAINER_NAME" tail -n 20 "/var/log/gitlab/restore_${ts}.log" 2>&1 \
       | sed -e "s/^/[status] /" >&2 || true
   fi
+  exit 1
 }
 
 main() {

@@ -37,7 +37,17 @@ import_backup_and_config() {
   mkdir -p "$DATA_ROOT/data/backups"
   cp -a "$bk" "$DATA_ROOT/data/backups/"
   log "[>] Распаковываю gitlab_config.tar → $DATA_ROOT"
-  tar -C "$DATA_ROOT" -xf "$cfg"   # создаст $DATA_ROOT/config
+  tar -C "$DATA_ROOT" -xf "$cfg"
+  # Поддержка архивов без вложенной папки config
+  if [ -f "$DATA_ROOT/gitlab.rb" ] || [ -f "$DATA_ROOT/gitlab-secrets.json" ]; then
+    mkdir -p "$DATA_ROOT/config"
+    [ -f "$DATA_ROOT/gitlab.rb" ] && mv -f "$DATA_ROOT/gitlab.rb" "$DATA_ROOT/config/"
+    [ -f "$DATA_ROOT/gitlab-secrets.json" ] && mv -f "$DATA_ROOT/gitlab-secrets.json" "$DATA_ROOT/config/"
+  fi
+  if [ ! -f "$DATA_ROOT/config/gitlab.rb" ] || [ ! -f "$DATA_ROOT/config/gitlab-secrets.json" ]; then
+    err "В gitlab_config.tar нет gitlab.rb или gitlab-secrets.json"
+    exit 1
+  fi
   ok "Импортированы backup и конфиг"
   set_state IMPORT_DONE 1
 }

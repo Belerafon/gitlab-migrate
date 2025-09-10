@@ -15,11 +15,12 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/dirs.sh"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
+. "$BASEDIR/lib/sanitize.sh"
 
 LOG_DIR="$BASEDIR/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/gitlab-migrate-$(date +%Y%m%d-%H%M%S).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+exec > >(sanitize_log | tee -a "$LOG_FILE") 2>&1
 
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0

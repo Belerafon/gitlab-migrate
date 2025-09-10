@@ -3,6 +3,17 @@
 # Source docker lib for container_running function
 . "$BASEDIR/lib/docker.sh"
 
+run_reconfigure() {
+  local cmd="${1:-gitlab-ctl reconfigure}"
+  if ! dexec "$cmd >/var/log/gitlab/reconfigure.log 2>&1"; then
+    err "gitlab-ctl reconfigure failed"
+    if ! dexec "grep -nE 'ERROR|FATAL|CRIT|Chef Infra Client failed' /var/log/gitlab/reconfigure.log | tail -n 20" 2>&1 | sed -e "s/^/[status] /" >&2; then
+      dexec 'tail -n 20 /var/log/gitlab/reconfigure.log' 2>&1 | sed -e "s/^/[status] /" >&2 || true
+    fi
+    return 1
+  fi
+}
+
 find_latest_backup_in_src() {
   local backup_files=()
   for pattern in "*_gitlab_backup.tar" "*_gitlab_backup.tar.gz"; do
@@ -154,8 +165,8 @@ check_backup_versions() {
     warn "Версия схемы БД бэкапа (${bk_db}) отличается от версии контейнера (${cur_db})"
   fi
 
-  log "[>] Сводка окружения контейнера:"
-  dexec 'gitlab-rake gitlab:env:info' || true
+  log "[>] Статус служб в контейнере:"
+  dexec 'gitlab-ctl status' || true
 }
 
 restore_backup_if_needed() {
@@ -204,7 +215,7 @@ restore_backup_if_needed() {
   dexec 'touch /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true
   dexec 'update-permissions' >/dev/null 2>&1 || warn "update-permissions после fix_owners завершился с ошибкой"
   log "[>] Применение новых прав (gitlab-ctl reconfigure)…"
-  dexec 'gitlab-ctl reconfigure >/dev/null 2>&1' || true
+  run_reconfigure || exit 1
   wait_gitlab_ready
   wait_postgres_ready
 
@@ -310,7 +321,7 @@ restore_backup_if_needed() {
         docker exec -i "$CONTAINER_NAME" update-permissions >/dev/null 2>&1 || true
         docker restart "$CONTAINER_NAME" >/dev/null || true
         sleep "$WAIT_AFTER_START"
-        docker exec -i "$CONTAINER_NAME" gitlab-ctl reconfigure >/dev/null 2>&1 || true
+        run_reconfigure || true
         sleep "$WAIT_AFTER_START"
       fi
 
@@ -329,7 +340,7 @@ restore_backup_if_needed() {
   done
 
   dexec 'rm -f /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true
-  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure >/dev/null 2>&1' || true
+  run_reconfigure 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
   dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl restart >/dev/null 2>&1'     || true
 
   set_state RESTORED_TS "$ts"
@@ -369,7 +380,7 @@ verify_restore_success() {
   # Если критические службы не запущены, пытаемся автоматический recovery
   if [ $service_ok -eq 0 ]; then
     warn "Критические службы не запустились — выполняю reconfigure и restart"
-    dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure >/dev/null 2>&1' || true
+    run_reconfigure 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
     dexec 'gitlab-ctl restart >/dev/null 2>&1'     || true
     sleep 30
 

@@ -111,10 +111,10 @@ check_backup_versions() {
   log "[>] Проверка метаданных бэкапа…"
   tmp="$(mktemp)"
   if tar -xf "$canon" backup_information.yml -O >"$tmp" 2>/dev/null; then
-    bk_ver=$(grep '^gitlab_version:' "$tmp" | awk '{print $2}' || true)
-    bk_db=$(grep '^db_version:' "$tmp" | awk '{print $2}' || true)
+    bk_ver=$(grep '^:gitlab_version:' "$tmp" | awk '{print $2}' || true)
+    bk_db=$(grep '^:db_version:' "$tmp" | awk '{print $2}' || true)
     log "  - GitLab в бэкапе: ${bk_ver:-unknown}"
-    log "  - PostgreSQL в бэкапе: ${bk_db:-unknown}"
+    log "  - Версия схемы БД в бэкапе: ${bk_db:-unknown}"
     if [ -z "$bk_ver" ] || [ -z "$bk_db" ]; then
       warn "Отсутствуют метаданные в backup_information.yml"
       log "  - Путь к архиву (host): $canon"
@@ -133,15 +133,15 @@ check_backup_versions() {
   rm -f "$tmp" 2>/dev/null || true
 
   cur_ver=$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')
-  cur_db=$(dexec 'gitlab-psql --version 2>/dev/null || true' | awk '{print $3}' | tr -d '\n')
+  cur_db=$(dexec "gitlab-psql -d gitlabhq_production -t -c 'SELECT MAX(version) FROM schema_migrations;' 2>/dev/null" | tr -d '[:space:]')
   log "  - GitLab в контейнере: ${cur_ver:-unknown}"
-  log "  - PostgreSQL в контейнере: ${cur_db:-unknown}"
+  log "  - Версия схемы БД в контейнере: ${cur_db:-unknown}"
 
   if [ -n "$bk_ver" ] && [ "$bk_ver" != "$cur_ver" ]; then
     warn "Версия GitLab бэкапа (${bk_ver}) отличается от версии контейнера (${cur_ver})"
   fi
   if [ -n "$bk_db" ] && [ "$bk_db" != "$cur_db" ]; then
-    warn "Версия PostgreSQL бэкапа (${bk_db}) отличается от версии контейнера (${cur_db})"
+    warn "Версия схемы БД бэкапа (${bk_db}) отличается от версии контейнера (${cur_db})"
   fi
 
   log "[>] Сводка окружения контейнера:"

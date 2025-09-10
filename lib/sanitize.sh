@@ -2,13 +2,7 @@
 # shellcheck shell=sh
 sanitize_log() {
   awk '
-    /GITLAB_ROOT_PASSWORD/ {
-      gsub(/GITLAB_ROOT_PASSWORD"=>"[^"]+/, "GITLAB_ROOT_PASSWORD\"=>\"[REDACTED]")
-    }
-    /[A-Za-z0-9_]*(PASSWORD|TOKEN|SECRET|KEY)[A-Za-z0-9_]*/ {
-      print "[REDACTED SENSITIVE DATA]"
-      next
-    }
+    BEGIN { IGNORECASE=1 }
     /BEGIN RSA PRIVATE KEY/ {
       print "[REDACTED RSA PRIVATE KEY]"
       skip=1
@@ -19,6 +13,10 @@ sanitize_log() {
       next
     }
     skip { next }
+    /(^|[^A-Za-z0-9])(password|token|secret|key)([^A-Za-z0-9]|$)/ {
+      print "[REDACTED SENSITIVE DATA]"
+      next
+    }
     { print }
   '
 }

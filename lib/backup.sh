@@ -7,7 +7,9 @@ run_reconfigure() {
   local cmd="${1:-gitlab-ctl reconfigure}"
   if ! dexec "$cmd >/var/log/gitlab/reconfigure.log 2>&1"; then
     err "gitlab-ctl reconfigure failed"
-    dexec 'tail -n 20 /var/log/gitlab/reconfigure.log' 2>&1 | sed -e "s/^/[status] /" >&2 || true
+    if ! dexec "grep -nE 'ERROR|FATAL|CRIT|Chef Infra Client failed' /var/log/gitlab/reconfigure.log | tail -n 20" 2>&1 | sed -e "s/^/[status] /" >&2; then
+      dexec 'tail -n 20 /var/log/gitlab/reconfigure.log' 2>&1 | sed -e "s/^/[status] /" >&2 || true
+    fi
     return 1
   fi
 }

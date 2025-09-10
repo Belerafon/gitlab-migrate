@@ -127,8 +127,11 @@ wait_postgres_ready() {
   until dexec 'gitlab-psql -c "SELECT 1;" >/dev/null 2>&1'; do
     sleep 5; waited=$((waited+5))
     if [ "$waited" -ge "$READY_TIMEOUT" ]; then
-      warn "PostgreSQL не принимает подключения за ${READY_TIMEOUT}s — продолжаю с риском"
-      break
+      err "PostgreSQL не принимает подключения за ${READY_TIMEOUT}s"
+      log "[status] Последние строки /var/log/gitlab/postgresql/current:" 
+      dexec 'tail -n 20 /var/log/gitlab/postgresql/current' 2>&1 \
+        | sed -e "s/^/[status] /" >&2 || true
+      return 1
     fi
   done
   ok "PostgreSQL готов"

@@ -1,4 +1,5 @@
 # lib/upgrade.sh
+# shellcheck shell=bash
 # Function to get the latest patch version for a given series
 latest_patch_tag() {
   local series="$1"
@@ -30,7 +31,18 @@ upgrade_to_series() {
     wait_upgrade_completion
   
     log "[>] Проверка миграций схемы:"
-    dexec 'gitlab-rake db:migrate:status | tail -n +1' || true
+    local ms_output down_lines up_count down_count
+    ms_output=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null || true)
+    down_lines=$(printf '%s\n' "$ms_output" | grep -E '^\s*down' || true)
+    up_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*up' || true)
+    down_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*down' || true)
+
+    if [ -n "$down_lines" ]; then
+      printf '%s\n' "$down_lines" | sed 's/^/  /'
+    else
+      log "  все миграции применены"
+    fi
+    log "  итого: up=$up_count, down=$down_count"
   
     log "[>] Статус фоновых миграций (если задача есть):"
     dexec 'gitlab-rake gitlab:background_migrations:status' >/dev/null 2>&1 && \

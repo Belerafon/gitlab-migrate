@@ -319,8 +319,8 @@ restore_backup_if_needed() {
   done
 
   dexec 'rm -f /var/opt/gitlab/skip-auto-migrations' >/dev/null 2>&1 || true
-  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
-  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl restart'     || true
+  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure >/dev/null 2>&1' || true
+  dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl restart >/dev/null 2>&1'     || true
 
   set_state RESTORED_TS "$ts"
   ok "Восстановление завершено"
@@ -337,7 +337,7 @@ verify_restore_success() {
   fi
   
   # Start services inside container
-  dexec 'gitlab-ctl start' || true
+  dexec 'gitlab-ctl start >/dev/null 2>&1' || true
   sleep 30
 
   # Wait for GitLab and PostgreSQL to be ready
@@ -359,8 +359,8 @@ verify_restore_success() {
   # Если критические службы не запущены, пытаемся автоматический recovery
   if [ $service_ok -eq 0 ]; then
     warn "Критические службы не запустились — выполняю reconfigure и restart"
-    dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure' || true
-    dexec 'gitlab-ctl restart'     || true
+    dexec 'env -u GITLAB_SKIP_DATABASE_MIGRATION gitlab-ctl reconfigure >/dev/null 2>&1' || true
+    dexec 'gitlab-ctl restart >/dev/null 2>&1'     || true
     sleep 30
 
     service_ok=1

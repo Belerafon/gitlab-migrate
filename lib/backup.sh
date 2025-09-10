@@ -165,8 +165,8 @@ check_backup_versions() {
     warn "Версия схемы БД бэкапа (${bk_db}) отличается от версии контейнера (${cur_db})"
   fi
 
-  log "[>] Сводка окружения контейнера:"
-  dexec 'gitlab-rake gitlab:env:info' || true
+  log "[>] Статус служб в контейнере:"
+  dexec 'gitlab-ctl status' || true
 }
 
 restore_backup_if_needed() {

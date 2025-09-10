@@ -37,9 +37,11 @@ upgrade_to_series() {
     dexec 'gitlab-rake gitlab:background_migrations:status' || echo "(task not available)" >&2
   
     # Additional check for successful upgrade
-    local current_version
+    local current_version current_base target_base
     current_version=$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')
-    if [[ "$current_version" != "$target"* ]]; then
+    target_base="${target%%-*}"
+    current_base="${current_version%%-*}"
+    if [[ "$current_base" != "$target_base" ]]; then
       warn "Версия после апгрейда не соответствует ожидаемой: $current_version != $target"
       log "[>] Попытка повторного запуска служб..."
       dexec 'gitlab-ctl restart' || true
@@ -47,7 +49,8 @@ upgrade_to_series() {
       wait_gitlab_ready
       wait_postgres_ready
       current_version=$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')
-      if [[ "$current_version" != "$target"* ]]; then
+      current_base="${current_version%%-*}"
+      if [[ "$current_base" != "$target_base" ]]; then
         err "Апгрейд до $target не удался. Текущая версия: $current_version"
         exit 1
       fi

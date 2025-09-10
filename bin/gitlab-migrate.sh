@@ -16,6 +16,11 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
 
+LOG_DIR="$BASEDIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/gitlab-migrate-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0
 
@@ -34,7 +39,7 @@ cleanup_previous_run() {
     rm -f "$LOCK_FILE"
   fi
   echo $$ > "$LOCK_FILE"
-  trap 'rm -f "$LOCK_FILE"' EXIT
+  trap 'rm -f "$LOCK_FILE"; log "Лог файл: $LOG_FILE"' EXIT
 }
 
 cleanup_previous_run
@@ -107,7 +112,10 @@ error_trap() {
   local dlog
   dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
   log "[status] ------ Ошибки из docker logs ------"
-  printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' | sed -e "s/^/[status] /" >&2 || true
+  printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed|It is required to upgrade to the latest' | sed -e "s/^/[status] /" >&2 || true
+  if printf '%s\n' "$dlog" | grep -q 'It is required to upgrade to the latest 14.0.x version first'; then
+    warn "[status] Обнаружено требование предварительного обновления до 14.0.x"
+  fi
   log "[status] ------ Последние строки docker logs ------"
   printf '%s\n' "$dlog" | sed -e "s/^/[status] /" >&2 || true
 
@@ -132,6 +140,13 @@ error_trap() {
   if container_running; then
     log "[status] ------ Свободная память контейнера ------"
     dexec 'free -h' 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  fi
+
+  log "[status] ------ Свободное место на диске ------"
+  df -h 2>&1 | sed -e "s/^/[status] /" >&2 || true
+  if container_running; then
+    log "[status] ------ Свободное место на диске (контейнер) ------"
+    dexec 'df -h' 2>&1 | sed -e "s/^/[status] /" >&2 || true
   fi
 
   log "[status] ------ dmesg (последние строки) ------"

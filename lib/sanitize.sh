@@ -5,6 +5,7 @@ sanitize_log() {
     BEGIN { IGNORECASE=1 }
     /BEGIN RSA PRIVATE KEY/ {
       print "[REDACTED RSA PRIVATE KEY]"
+      fflush()
       skip=1
       next
     }
@@ -15,8 +16,9 @@ sanitize_log() {
     skip { next }
     /(^|[^A-Za-z0-9])(password|token|secret|key)([^A-Za-z0-9]|$)/ {
       print "[REDACTED SENSITIVE DATA]"
+      fflush()
       next
     }
-    { print }
+    { print; fflush() }
   '
 }

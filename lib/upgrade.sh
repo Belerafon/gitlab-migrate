@@ -24,8 +24,37 @@ compute_stops() {
   [ "$DO_TARGET_17" = "yes" ] && echo "17"
 }
 
+# Проверяет версию PostgreSQL и при необходимости выполняет pg-upgrade
+ensure_postgres_at_least() {
+  local required="$1" series="$2"
+  log "[>] Проверка версии PostgreSQL перед переходом на ${series}"
+  local pg_ver pg_major
+  pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
+  pg_major="${pg_ver%%.*}"
+  log "  текущая версия: ${pg_ver:-unknown}"
+  if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
+    log "  выполняю gitlab-ctl pg-upgrade"
+    if dexec 'gitlab-ctl pg-upgrade'; then
+      wait_postgres_ready
+      ok "PostgreSQL обновлён"
+    else
+      err "pg-upgrade завершился с ошибкой. Логи: /var/log/gitlab/pg-upgrade"
+      exit 1
+    fi
+  fi
+}
+
 upgrade_to_series() {
-  local series="$1" target
+  local series="$1" target required_pg=""
+  case "$series" in
+    "14.0") required_pg=12 ;;
+    "15.11") required_pg=13 ;;
+    "16.11") required_pg=14 ;;
+    "17") required_pg=15 ;;
+  esac
+  if [[ -n "$required_pg" ]]; then
+    ensure_postgres_at_least "$required_pg" "$series"
+  fi
   if [[ "$series" =~ ^[0-9]+\.[0-9]+$ ]] || [[ "$series" =~ ^[0-9]+$ ]]; then
     target="$(latest_patch_tag "$series")"
     else

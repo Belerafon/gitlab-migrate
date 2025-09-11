@@ -24,8 +24,30 @@ compute_stops() {
   [ "$DO_TARGET_17" = "yes" ] && echo "17"
 }
 
+# Проверяет версию PostgreSQL и при необходимости выполняет pg-upgrade
+ensure_postgres12() {
+  log "[>] Проверка версии PostgreSQL перед переходом на 14.0"
+  local pg_ver pg_major
+  pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
+  pg_major="${pg_ver%%.*}"
+  log "  текущая версия: ${pg_ver:-unknown}"
+  if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt 12 ]]; then
+    log "  выполняю gitlab-ctl pg-upgrade"
+    if dexec 'gitlab-ctl pg-upgrade'; then
+      wait_postgres_ready
+      ok "PostgreSQL обновлён"
+    else
+      err "pg-upgrade завершился с ошибкой. Логи: /var/log/gitlab/pg-upgrade"
+      exit 1
+    fi
+  fi
+}
+
 upgrade_to_series() {
   local series="$1" target
+  if [ "$series" = "14.0" ]; then
+    ensure_postgres12
+  fi
   if [[ "$series" =~ ^[0-9]+\.[0-9]+$ ]] || [[ "$series" =~ ^[0-9]+$ ]]; then
     target="$(latest_patch_tag "$series")"
     else

@@ -33,12 +33,19 @@ ensure_postgres_at_least() {
   pg_major="${pg_ver%%.*}"
   log "  текущая версия: ${pg_ver:-unknown}"
   if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
+    log "  выполняю gitlab-ctl reconfigure (подготовка к pg-upgrade)"
+    if dexec 'gitlab-ctl reconfigure'; then
+      ok "reconfigure выполнен"
+    else
+      err "gitlab-ctl reconfigure завершился с ошибкой"
+      exit 1
+    fi
     log "  выполняю gitlab-ctl pg-upgrade"
     if dexec 'gitlab-ctl pg-upgrade'; then
       wait_postgres_ready
       ok "PostgreSQL обновлён"
     else
-      err "pg-upgrade завершился с ошибкой. Логи: /var/log/gitlab/pg-upgrade"
+      err "pg-upgrade завершился с ошибкой. Лог: /var/log/gitlab/pg-upgrade-*.log (на хосте: ${DATA_ROOT}/logs/pg-upgrade-*.log)"
       exit 1
     fi
   fi

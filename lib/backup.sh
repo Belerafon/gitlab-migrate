@@ -5,8 +5,16 @@
 
 run_reconfigure() {
   local cmd="${1:-gitlab-ctl reconfigure}"
-  if ! dexec "$cmd >/var/log/gitlab/reconfigure.log 2>&1"; then
-    err "gitlab-ctl reconfigure failed (см. /var/log/gitlab/reconfigure.log)"
+  local rlog_container="/var/log/gitlab/reconfigure.log"
+  local rlog_host="${DATA_ROOT}/logs/reconfigure.log"
+  rm -f "$rlog_host" 2>/dev/null || true
+
+  if dexec "set -o pipefail; $cmd |& tee '$rlog_container'"; then
+    tail -n 20 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
+    return 0
+  else
+    tail -n 50 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
+    err "gitlab-ctl reconfigure завершился с ошибкой. Лог: $rlog_host"
     return 1
   fi
 }

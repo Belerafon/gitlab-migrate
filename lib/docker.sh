@@ -2,7 +2,14 @@
 # shellcheck shell=bash
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
-docker_ok() { docker info >/dev/null 2>&1; }
+docker_ok() {
+  local t=${DOCKER_INFO_TIMEOUT:-10}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$t" docker info >/dev/null 2>&1
+  else
+    docker info >/dev/null 2>&1
+  fi
+}
 
 # Use non-login shell to avoid TTY errors
 dexec() {

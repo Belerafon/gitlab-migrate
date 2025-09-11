@@ -91,7 +91,6 @@ error_trap() {
   log "[status] ------ Ошибки из docker logs ------"
   printf '%s\n' "$dlog" \
     | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed|It is required to upgrade to the latest' \
-    | sanitize_log \
     | awk '!seen[$0]++' \
     | sed -e "s/^/[status] /" >&2 || true
   if printf '%s\n' "$dlog" | grep -q 'It is required to upgrade to the latest 14.0.x version first'; then
@@ -100,7 +99,6 @@ error_trap() {
   log "[status] ------ Последние строки docker logs ------"
   printf '%s\n' "$dlog" \
     | tail -n 40 \
-    | sanitize_log \
     | awk '!seen[$0]++' \
     | sed -e "s/^/[status] /" >&2 || true
 

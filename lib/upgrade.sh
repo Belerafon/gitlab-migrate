@@ -28,10 +28,19 @@ compute_stops() {
 ensure_postgres_at_least() {
   local required="$1" series="$2"
   log "[>] Проверка версии PostgreSQL перед переходом на ${series}"
-  local pg_ver pg_major
+  local pg_ver pg_major data_pg_ver data_pg_major
   pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
   pg_major="${pg_ver%%.*}"
-  log "  текущая версия: ${pg_ver:-unknown}"
+  data_pg_ver=$(dexec 'cat /var/opt/gitlab/postgresql/data/PG_VERSION 2>/dev/null || echo unknown')
+  data_pg_major="${data_pg_ver%%.*}"
+  log "  текущая версия бинарников: ${pg_ver:-unknown}"
+  log "  версия данных в каталоге: ${data_pg_ver:-unknown}"
+
+  if [[ -n "$pg_major" ]] && [[ -n "$data_pg_major" ]] && [[ "$data_pg_major" != "$pg_major" ]]; then
+    err "Каталог данных /var/opt/gitlab/postgresql/data создан версией ${data_pg_ver}, а текущие бинарники ${pg_ver}. Восстанови корректный бэкап или очисти каталог перед повтором."
+    exit 1
+  fi
+
   if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
     log "  выполняю gitlab-ctl reconfigure (подготовка к pg-upgrade)"
     if dexec 'gitlab-ctl reconfigure >/tmp/reconfigure.log 2>&1'; then
@@ -98,8 +107,11 @@ upgrade_to_series() {
     log "  итого: up=$up_count, down=$down_count"
   
     log "[>] Статус фоновых миграций (если задача есть):"
-    dexec 'gitlab-rake gitlab:background_migrations:status' >/dev/null 2>&1 && \
-    dexec 'gitlab-rake gitlab:background_migrations:status' || echo "(task not available)" >&2
+    if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
+      dexec 'gitlab-rake gitlab:background_migrations:status' || warn "Задача gitlab:background_migrations:status завершилась с ошибкой"
+    else
+      echo "(task not available)" >&2
+    fi
   
     # Additional check for successful upgrade
     local current_version current_base target_base

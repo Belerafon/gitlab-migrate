@@ -26,8 +26,8 @@ dexec() {
     warn "[dexec] docker exec завершился с кодом $rc"
     log "------ Статус контейнера ------"
     docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 || true
-    log "------ Последние строки docker logs ------"
-    docker logs --tail 20 "$CONTAINER_NAME" 2>&1 || true
+    log "------ Подсказка по логам ------"
+    log "docker logs --tail 20 $CONTAINER_NAME"
   fi
 
   return $rc
@@ -119,11 +119,11 @@ wait_gitlab_ready() {
 
 wait_postgres_ready() {
   log "[>] Ожидаю PostgreSQL (unix socket и статус)…"
-  local waited=0
+  local waited=0 timeout=${POSTGRES_READY_TIMEOUT:-$READY_TIMEOUT}
   until dexec 'test -S /var/opt/gitlab/postgresql/.s.PGSQL.5432 && gitlab-ctl status postgresql >/dev/null 2>&1'; do
     sleep 3; waited=$((waited+3))
-    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
-      warn "PostgreSQL не поднялся за ${READY_TIMEOUT}s — запускаю reconfigure и продолжаю ждать"
+    if [ "$waited" -ge "$timeout" ]; then
+      warn "PostgreSQL не поднялся за ${timeout}s — запускаю reconfigure и продолжаю ждать"
       dexec 'gitlab-ctl reconfigure >/dev/null 2>&1 || true'
       waited=0
     fi
@@ -133,9 +133,9 @@ wait_postgres_ready() {
   waited=0
   until dexec 'gitlab-psql -c "SELECT 1;" >/dev/null 2>&1'; do
     sleep 5; waited=$((waited+5))
-    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
-      err "PostgreSQL не принимает подключения за ${READY_TIMEOUT}s"
-      log "[status] Последние строки /var/log/gitlab/postgresql/current:" 
+    if [ "$waited" -ge "$timeout" ]; then
+      err "PostgreSQL не принимает подключения за ${timeout}s"
+      log "[status] Последние строки /var/log/gitlab/postgresql/current:"
       dexec 'tail -n 20 /var/log/gitlab/postgresql/current' 2>&1 \
         | sed -e "s/^/[status] /" >&2 || true
       return 1

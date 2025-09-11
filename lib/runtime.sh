@@ -86,36 +86,14 @@ error_trap() {
   docker inspect -f 'State: {{.State.Status}}, Exit: {{.State.ExitCode}}, OOMKilled: {{.State.OOMKilled}}, Restarts: {{.RestartCount}}' "$CONTAINER_NAME" 2>&1 \
     | sed -e "s/^/[status] /" >&2 || true
 
-  local dlog
-  dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
-  log "[status] ------ Ошибки из docker logs ------"
-  printf '%s\n' "$dlog" \
-    | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed|It is required to upgrade to the latest' \
-    | awk '!seen[$0]++' \
-    | sed -e "s/^/[status] /" >&2 || true
-  if printf '%s\n' "$dlog" | grep -q 'It is required to upgrade to the latest 14.0.x version first'; then
-    warn "[status] Обнаружено требование предварительного обновления до 14.0.x"
-  fi
-  log "[status] ------ Последние строки docker logs ------"
-  printf '%s\n' "$dlog" \
-    | tail -n 40 \
-    | awk '!seen[$0]++' \
-    | sed -e "s/^/[status] /" >&2 || true
-
-  log "[status] ------ Последние строки chef-client.log ------"
-  if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
-    docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 \
-      | sed -e "s/^/[status] /" >&2 || true
-  else
-    log "[status] файл /var/log/gitlab/chef-client.log отсутствует"
-  fi
-
-  log "[status] ------ Последние строки reconfigure.log ------"
-  if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/reconfigure.log >/dev/null 2>&1; then
-    docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 \
-      | sed -e "s/^/[status] /" >&2 || true
-  else
-    log "[status] файл /var/log/gitlab/reconfigure.log отсутствует"
+  log "[status] ------ Подсказки по логам ------"
+  log "[status] docker logs --tail 200 $CONTAINER_NAME"
+  log "[status] docker exec -it $CONTAINER_NAME tail -n 20 /var/log/gitlab/chef-client.log"
+  log "[status] docker exec -it $CONTAINER_NAME tail -n 20 /var/log/gitlab/reconfigure.log"
+  local ts
+  ts=$(get_state BACKUP_TS || true)
+  if [ -n "$ts" ]; then
+    log "[status] docker exec -it $CONTAINER_NAME tail -n 20 /var/log/gitlab/restore_${ts}.log"
   fi
 
   log "[status] ------ Свободная память хоста ------"
@@ -134,13 +112,5 @@ error_trap() {
 
   log "[status] ------ dmesg (последние строки) ------"
   dmesg | tail -n 20 | sed -e "s/^/[status] /" >&2 || true
-
-  local ts
-  ts=$(get_state BACKUP_TS || true)
-  if [ -n "$ts" ] && docker exec -i "$CONTAINER_NAME" test -f "/var/log/gitlab/restore_${ts}.log" >/dev/null 2>&1; then
-    log "[status] ------ Последние строки restore_${ts}.log ------"
-    docker exec -i "$CONTAINER_NAME" tail -n 20 "/var/log/gitlab/restore_${ts}.log" 2>&1 \
-      | sed -e "s/^/[status] /" >&2 || true
-  fi
   exit 1
 }

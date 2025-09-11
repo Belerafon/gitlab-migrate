@@ -6,10 +6,7 @@
 run_reconfigure() {
   local cmd="${1:-gitlab-ctl reconfigure}"
   if ! dexec "$cmd >/var/log/gitlab/reconfigure.log 2>&1"; then
-    err "gitlab-ctl reconfigure failed"
-    if ! dexec "grep -nE 'ERROR|FATAL|CRIT|Chef Infra Client failed' /var/log/gitlab/reconfigure.log | tail -n 20" 2>&1 | sed -e "s/^/[status] /" >&2; then
-      dexec 'tail -n 20 /var/log/gitlab/reconfigure.log' 2>&1 | sed -e "s/^/[status] /" >&2 || true
-    fi
+    err "gitlab-ctl reconfigure failed (см. /var/log/gitlab/reconfigure.log)"
     return 1
   fi
 }
@@ -252,52 +249,10 @@ restore_backup_if_needed() {
     else
       warn "Попытка $restore_attempt/$max_attempts завершилась ошибкой (код ${cmd_rc})"
       rc_after=$(container_restart_count)
-
-      # Enhanced error diagnostics
-      log "------ Ошибки из ${rlog} (полный контекст) ------"
-      if ! dexec "grep -nE 'ERROR|FATAL|rake aborted|tar:|Permission denied|No space left|No such file|Database.*version|PG::|invalid' '${rlog}' -B 5 -A 5 | tail -n 100"; then
-        log "(подходящих строк не найдено)"
-      fi
-
-      # Show critical last 50 lines regardless of error patterns
-      log "------ Последние 50 строк лога ------"
-      dexec "tail -n 50 '${rlog}'" || true
-      log "------ Полный лог ${rlog} ------"
-      dexec "cat '${rlog}'" || true
-      log "------ Проверка прав Postgres ------"
-      dexec "ls -ld /var/opt/gitlab/postgresql /var/opt/gitlab/postgresql/data /var/opt/gitlab/postgresql/data/global" 2>&1 || true
-      if dexec "test -e /var/opt/gitlab/postgresql/data/global/pg_filenode.map" >/dev/null 2>&1; then
-        dexec "ls -l /var/opt/gitlab/postgresql/data/global/pg_filenode.map" || true
-      fi
-
-
-      # Дополнительные данные о состоянии контейнера
-      log "------ Статус контейнера ------"
-      docker ps -a --filter "name=$CONTAINER_NAME" || true
-      log "------ Ошибки из docker logs ------"
-      local dlog
-      dlog=$(docker logs --tail 200 "$CONTAINER_NAME" 2>&1 || true)
-      if printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' >/dev/null; then
-        printf '%s\n' "$dlog" | grep -iE 'ERROR|FATAL|rake aborted|database version is too old|Chef Client failed' || true
-      else
-        printf '%s\n' "$dlog"
-      fi
-
-      log "------ Последние строки chef-client.log ------"
-      if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/chef-client.log >/dev/null 2>&1; then
-        docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/chef-client.log 2>&1 || true
-      else
-        log "файл /var/log/gitlab/chef-client.log отсутствует"
-      fi
-      log "------ Последние строки reconfigure.log ------"
-      if docker exec -i "$CONTAINER_NAME" test -f /var/log/gitlab/reconfigure.log >/dev/null 2>&1; then
-        docker exec -i "$CONTAINER_NAME" tail -n 20 /var/log/gitlab/reconfigure.log 2>&1 || true
-      else
-        log "файл /var/log/gitlab/reconfigure.log отсутствует"
-      fi
+      log "Подробности см. в ${rlog} и через docker logs --tail 200 $CONTAINER_NAME"
 
       if [ "$cmd_rc" -eq 137 ]; then
-        warn "Команда gitlab-backup restore была прервана (код 137) — процесс был убит"
+        warn "Команда gitlab-backup restore была прервана (код 137) — проверяю память"
         log "------ Свободная память хоста ------"
         free -h 2>&1 | sed -e 's/^/[host] /' >&2 || true
         if container_running; then
@@ -311,8 +266,6 @@ restore_backup_if_needed() {
         if printf '%s' "$last_dmesg" | grep -qi 'Killed process'; then
           err "Обнаружены признаки OOM: процесс был убит ядром. Увеличьте доступную RAM/Swap и запустите заново"
           exit 1
-        else
-          warn "Признаков нехватки памяти не найдено — проверьте логи выше и состояние контейнера"
         fi
       fi
 
@@ -329,8 +282,7 @@ restore_backup_if_needed() {
       wait_postgres_ready
 
       if [ $restore_attempt -eq $max_attempts ]; then
-        # More detailed final error message
-        err "Восстановление завершилось с ошибкой после $max_attempts попыток. Проверьте полный лог: ${rlog}";
+        err "Восстановление завершилось с ошибкой после $max_attempts попыток. Проверьте лог: ${rlog}"
         exit 1
       else
         warn "Повторю попытку через 30 секунд…"; sleep 30

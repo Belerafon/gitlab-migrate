@@ -56,13 +56,13 @@ ensure_postgres_at_least() {
     local pg_log_container="/var/log/gitlab/pg-upgrade.log"
     local pg_log_host="${DATA_ROOT}/logs/pg-upgrade.log"
     rm -f "$pg_log_host" 2>/dev/null || true
-    if dexec "gitlab-ctl pg-upgrade >'$pg_log_container' 2>&1"; then
-      tail -n 20 "$pg_log_host" | sed -e 's/^/    /'
+    if dexec "gitlab-ctl pg-upgrade 2>&1 | tee '$pg_log_container'"; then
+      dexec "tail -n 20 '$pg_log_container'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
       wait_postgres_ready
       ok "PostgreSQL обновлён"
     else
-      tail -n 50 "$pg_log_host" | sed -e 's/^/    /' || warn "лог pg-upgrade не найден"
-      if grep -q 'Old cluster data and binary directories are from different major versions' "$pg_log_host" 2>/dev/null; then
+      dexec "tail -n 50 '$pg_log_container'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
+      if dexec "grep -q 'Old cluster data and binary directories are from different major versions' '$pg_log_container'" 2>/dev/null; then
         err "Обнаружено несоответствие major-версий PostgreSQL. Каталог данных создан другой версией. Проверь /var/opt/gitlab/postgresql и восстанови его из корректного бэкапа или очисти перед повтором."
       fi
       err "pg-upgrade завершился с ошибкой. Лог: $pg_log_host"

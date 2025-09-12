@@ -431,6 +431,10 @@ snapshot_local_backup() {
 restore_from_local_snapshot() {
   local snap="$BASE_SNAPSHOT_DIR"
   if [ -d "$snap/config" ] && [ -d "$snap/data" ]; then
+    if [ "$(get_state SNAPSHOT_DONE || true)" = "1" ]; then
+      ok "Локальный бэкап уже создан и актуален — пропускаю восстановление"
+      return
+    fi
     if ask_yes_no "Найден локальный бэкап ${snap}. Восстановить его?" "y"; then
       stop_container
       log "[>] Восстанавливаю каталоги из ${snap}"

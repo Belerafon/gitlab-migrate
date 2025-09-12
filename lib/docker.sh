@@ -42,6 +42,16 @@ container_restart_count() {
   docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null | grep -v "mesg: ttyname failed" || echo 0
 }
 
+# Останавливает и удаляет контейнер, если он существует
+stop_container() {
+  if docker ps -a --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
+    log "[>] Останавливаю и удаляю контейнер ${CONTAINER_NAME}…"
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || \
+      warn "Не удалось удалить контейнер $CONTAINER_NAME"
+    sleep 5
+  fi
+}
+
 resolve_and_pull_base_image() {
   local base_ver="$1" cand ok_tag=""
   for cand in "${base_ver}-ce.0" "${base_ver}"; do

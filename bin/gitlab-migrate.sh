@@ -73,6 +73,8 @@ main() {
     ok "Базовый контейнер уже стартовал — пропускаю запуск"; show_versions
   fi
 
+  ensure_permissions
+
   wait_gitlab_ready
   wait_postgres_ready
   log "[>] Версия PostgreSQL в контейнере:"

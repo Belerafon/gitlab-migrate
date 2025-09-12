@@ -107,6 +107,13 @@ show_versions() {
   dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo "unknown"' >&2 || true
 }
 
+ensure_permissions() {
+  if container_running; then
+    log "[>] Выравниваю права (update-permissions)…"
+    dexec 'update-permissions >/dev/null 2>&1' || warn "update-permissions завершился с ошибкой"
+  fi
+}
+
 wait_gitlab_ready() {
   log "[>] Ожидаю готовность gitlab-ctl status…"
   local waited=0

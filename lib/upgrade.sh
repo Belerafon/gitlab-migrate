@@ -28,9 +28,10 @@ compute_stops() {
 ensure_postgres_at_least() {
   local required="$1" series="$2"
   log "[>] Проверка версии PostgreSQL перед переходом на ${series}"
-  local pg_ver pg_major data_pg_ver data_pg_major
+  local pg_ver pg_major data_pg_ver data_pg_major old_bin_dir
   pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
   pg_major="${pg_ver%%.*}"
+  old_bin_dir="/opt/gitlab/embedded/postgresql/${pg_major}/bin"
   data_pg_ver=$(dexec 'cat /var/opt/gitlab/postgresql/data/PG_VERSION 2>/dev/null || echo unknown')
   data_pg_major="${data_pg_ver%%.*}"
   log "  текущая версия бинарников: ${pg_ver:-unknown}"
@@ -39,6 +40,8 @@ ensure_postgres_at_least() {
   dexec 'ls -al /var/opt/gitlab/postgresql' 2>/dev/null || true
   log "  содержимое /var/opt/gitlab/postgresql/data:"
   dexec 'ls -al /var/opt/gitlab/postgresql/data' 2>/dev/null || true
+  log "  доступные каталоги бинарников:"
+  dexec 'ls -1 /opt/gitlab/embedded/postgresql' 2>/dev/null || true
   if dexec 'command -v pg_controldata >/dev/null 2>&1'; then
     log "  pg_controldata (первые строки):"
     dexec 'pg_controldata /var/opt/gitlab/postgresql/data 2>/dev/null | head -n 20' || true
@@ -52,17 +55,28 @@ ensure_postgres_at_least() {
   if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
     log "  выполняю gitlab-ctl reconfigure (подготовка к pg-upgrade)"
     run_reconfigure || exit 1
+    local new_pg_ver new_pg_major new_bin_dir
+    new_pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
+    new_pg_major="${new_pg_ver%%.*}"
+    new_bin_dir="/opt/gitlab/embedded/postgresql/${new_pg_major}/bin"
+    log "  версия после reconfigure: ${new_pg_ver:-unknown}"
+    log "  старый путь бинарников: ${old_bin_dir}"
+    log "  новый путь бинарников: ${new_bin_dir}"
+    dexec "[ -d '${old_bin_dir}' ]" || { err "Не найден каталог старых бинарников: ${old_bin_dir}"; exit 1; }
+    dexec "[ -d '${new_bin_dir}' ]" || { err "Не найден каталог новых бинарников: ${new_bin_dir}"; exit 1; }
     log "  выполняю gitlab-ctl pg-upgrade"
     local pg_log_container="/var/log/gitlab/pg-upgrade.log"
     local pg_log_host="${DATA_ROOT}/logs/pg-upgrade.log"
     rm -f "$pg_log_host" 2>/dev/null || true
-    if dexec "gitlab-ctl pg-upgrade 2>&1 | tee '$pg_log_container'"; then
-      dexec "tail -n 20 '$pg_log_container'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
+    if dexec "gitlab-ctl pg-upgrade --old-bindir='${old_bin_dir}' --new-bindir='${new_bin_dir}' 2>&1 | tee '${pg_log_container}'"; then
+      dexec "tail -n 20 '${pg_log_container}'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
       wait_postgres_ready
+      pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
+      log "  версия после pg-upgrade: ${pg_ver:-unknown}"
       ok "PostgreSQL обновлён"
     else
-      dexec "tail -n 50 '$pg_log_container'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
-      if dexec "grep -q 'Old cluster data and binary directories are from different major versions' '$pg_log_container'" 2>/dev/null; then
+      dexec "tail -n 50 '${pg_log_container}'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
+      if dexec "grep -q 'Old cluster data and binary directories are from different major versions' '${pg_log_container}'" 2>/dev/null; then
         err "Обнаружено несоответствие major-версий PostgreSQL. Каталог данных создан другой версией. Проверь /var/opt/gitlab/postgresql и восстанови его из корректного бэкапа или очисти перед повтором."
       fi
       err "pg-upgrade завершился с ошибкой. Лог: $pg_log_host"

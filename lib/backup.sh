@@ -423,6 +423,7 @@ snapshot_local_backup() {
   log "[>] Запускаю контейнер после создания бэкапа…"
   docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
   sleep "$WAIT_AFTER_START"
+  ensure_permissions
 }
 
 restore_from_local_snapshot() {

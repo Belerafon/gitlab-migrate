@@ -35,6 +35,14 @@ ensure_postgres_at_least() {
   data_pg_major="${data_pg_ver%%.*}"
   log "  текущая версия бинарников: ${pg_ver:-unknown}"
   log "  версия данных в каталоге: ${data_pg_ver:-unknown}"
+  log "  содержимое /var/opt/gitlab/postgresql:"
+  dexec 'ls -al /var/opt/gitlab/postgresql' 2>/dev/null || true
+  log "  содержимое /var/opt/gitlab/postgresql/data:"
+  dexec 'ls -al /var/opt/gitlab/postgresql/data' 2>/dev/null || true
+  if dexec 'command -v pg_controldata >/dev/null 2>&1'; then
+    log "  pg_controldata (первые строки):"
+    dexec 'pg_controldata /var/opt/gitlab/postgresql/data 2>/dev/null | head -n 20' || true
+  fi
 
   if [[ -n "$pg_major" ]] && [[ -n "$data_pg_major" ]] && [[ "$data_pg_major" != "$pg_major" ]]; then
     err "Каталог данных /var/opt/gitlab/postgresql/data создан версией ${data_pg_ver}, а текущие бинарники ${pg_ver}. Восстанови корректный бэкап или очисти каталог перед повтором."
@@ -43,14 +51,7 @@ ensure_postgres_at_least() {
 
   if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
     log "  выполняю gitlab-ctl reconfigure (подготовка к pg-upgrade)"
-    if dexec 'gitlab-ctl reconfigure >/tmp/reconfigure.log 2>&1'; then
-      dexec 'tail -n 20 /tmp/reconfigure.log' | sed -e 's/^/    /'
-      ok "reconfigure выполнен"
-    else
-      dexec 'tail -n 50 /tmp/reconfigure.log' | sed -e 's/^/    /'
-      err "gitlab-ctl reconfigure завершился с ошибкой"
-      exit 1
-    fi
+    run_reconfigure || exit 1
     log "  выполняю gitlab-ctl pg-upgrade"
     local pg_log_container="/var/log/gitlab/pg-upgrade.log"
     local pg_log_host="${DATA_ROOT}/logs/pg-upgrade.log"

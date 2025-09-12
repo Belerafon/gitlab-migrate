@@ -47,6 +47,7 @@ main() {
   state_init
 
   ensure_dirs
+  restore_from_local_snapshot
   import_backup_and_config
 
   local base_ver base_tag
@@ -83,6 +84,12 @@ main() {
     verify_restore_success
   else
     ok "Проверка восстановления уже выполнена — пропускаю"
+  fi
+
+  if [ "$(get_state SNAPSHOT_DONE || true)" != "1" ]; then
+    snapshot_local_backup
+    ok "Снимок данных создан. Запустите скрипт снова для продолжения миграции"
+    exit 0
   fi
 
   log "[>] Формирую «лестницу» апгрейдов…"

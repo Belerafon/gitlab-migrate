@@ -9,7 +9,7 @@ run_reconfigure() {
   local rlog_host="${DATA_ROOT}/logs/reconfigure.log"
   rm -f "$rlog_host" 2>/dev/null || true
 
-  if dexec "set -o pipefail; $cmd |& tee '$rlog_container'"; then
+  if dexec "set -o pipefail; $cmd |& grep -Ev '(skipped due to|up to date)' | tee '$rlog_container'"; then
     tail -n 20 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
     return 0
   else
@@ -246,7 +246,7 @@ restore_backup_if_needed() {
     # Выполняем восстановление и сохраняем код возврата
     trap - ERR
     set +e
-    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}' | grep -E '^( \*[^ ]|Warning:|ERROR|FATAL|Starting Chef Client|Recipe:|Running handlers|Chef Client finished|gitlab Reconfigured|Restore task is done|real|user|sys)' | grep -vE 'ERROR: +(relation|sequence|table|index) .* does not exist|ERROR: +must be owner of extension' || true; exit \\${PIPESTATUS[0]}"
+    dexec "set -o pipefail; umask 077; ( time gitlab-backup restore BACKUP=$ts force=yes ) 2>&1 | tee '${rlog}' | grep -E '(Warning:|ERROR|FATAL|Starting Chef Client|Recipe:|Running handlers|Chef Client finished|gitlab Reconfigured|Restore task is done|real|user|sys)' | grep -vE 'ERROR: +(relation|sequence|table|index) .* does not exist|ERROR: +must be owner of extension' || true; exit \\${PIPESTATUS[0]}"
     cmd_rc=$?
     set -e
     trap error_trap ERR
@@ -402,4 +402,41 @@ verify_restore_success() {
 
   ok "Восстановление проверено"
   set_state RESTORE_DONE 1
+}
+
+BASE_SNAPSHOT_DIR="${DATA_ROOT}-snapshot"
+
+snapshot_local_backup() {
+  [ "$(get_state SNAPSHOT_DONE || true)" = "1" ] && { ok "Локальный бэкап уже создан — пропускаю"; return; }
+  log "[>] Останавливаю контейнер перед созданием локального бэкапа…"
+  docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  sleep 5
+  log "[>] Копирую каталоги ${DATA_ROOT} → ${BASE_SNAPSHOT_DIR}"
+  rm -rf "$BASE_SNAPSHOT_DIR" 2>/dev/null || true
+  mkdir -p "$BASE_SNAPSHOT_DIR"
+  cp -a "$DATA_ROOT"/{config,data,logs} "$BASE_SNAPSHOT_DIR/"
+  cp -a "$STATE_FILE" "$BASE_SNAPSHOT_DIR/state.env" 2>/dev/null || true
+  log "  - Размер репозиториев: $(du -sh "$BASE_SNAPSHOT_DIR/data/git-data/repositories" 2>/dev/null | cut -f1)"
+  log "  - Размер базы данных: $(du -sh "$BASE_SNAPSHOT_DIR/data/postgresql/data" 2>/dev/null | cut -f1)"
+  ok "Локальный бэкап создан"
+  set_state SNAPSHOT_DONE 1
+  log "[>] Запускаю контейнер после создания бэкапа…"
+  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  sleep "$WAIT_AFTER_START"
+}
+
+restore_from_local_snapshot() {
+  local snap="$BASE_SNAPSHOT_DIR"
+  if [ -d "$snap/config" ] && [ -d "$snap/data" ]; then
+    if ask_yes_no "Найден локальный бэкап ${snap}. Восстановить его?" "y"; then
+      log "[>] Восстанавливаю каталоги из ${snap}"
+      rm -rf "$DATA_ROOT"/config "$DATA_ROOT"/data "$DATA_ROOT"/logs
+      mkdir -p "$DATA_ROOT"
+      cp -a "$snap"/{config,data,logs} "$DATA_ROOT/"
+      cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
+      log "  - Размер репозиториев: $(du -sh "$DATA_ROOT/data/git-data/repositories" 2>/dev/null | cut -f1)"
+      log "  - Размер базы данных: $(du -sh "$DATA_ROOT/data/postgresql/data" 2>/dev/null | cut -f1)"
+      ok "Каталоги восстановлены из локального бэкапа"
+    fi
+  fi
 }

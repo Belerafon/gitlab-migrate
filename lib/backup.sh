@@ -430,11 +430,13 @@ restore_from_local_snapshot() {
   local snap="$BASE_SNAPSHOT_DIR"
   if [ -d "$snap/config" ] && [ -d "$snap/data" ]; then
     if ask_yes_no "Найден локальный бэкап ${snap}. Восстановить его?" "y"; then
+      stop_container
       log "[>] Восстанавливаю каталоги из ${snap}"
       rm -rf "$DATA_ROOT"/config "$DATA_ROOT"/data "$DATA_ROOT"/logs
       mkdir -p "$DATA_ROOT"
       cp -a "$snap"/{config,data,logs} "$DATA_ROOT/"
       cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
+      set_state BASE_STARTED 0
       log "  - Размер репозиториев: $(du -sh "$DATA_ROOT/data/git-data/repositories" 2>/dev/null | cut -f1)"
       log "  - Размер базы данных: $(du -sh "$DATA_ROOT/data/postgresql/data" 2>/dev/null | cut -f1)"
       ok "Каталоги восстановлены из локального бэкапа"

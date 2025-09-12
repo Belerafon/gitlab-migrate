@@ -415,11 +415,13 @@ snapshot_local_backup() {
   rm -rf "$BASE_SNAPSHOT_DIR" 2>/dev/null || true
   mkdir -p "$BASE_SNAPSHOT_DIR"
   cp -a "$DATA_ROOT"/{config,data,logs} "$BASE_SNAPSHOT_DIR/"
+  # Отмечаем создание снапшота до копирования state.env,
+  # чтобы восстановленный state отражал завершённый бэкап
+  set_state SNAPSHOT_DONE 1
   cp -a "$STATE_FILE" "$BASE_SNAPSHOT_DIR/state.env" 2>/dev/null || true
   log "  - Размер репозиториев: $(du -sh "$BASE_SNAPSHOT_DIR/data/git-data/repositories" 2>/dev/null | cut -f1)"
   log "  - Размер базы данных: $(du -sh "$BASE_SNAPSHOT_DIR/data/postgresql/data" 2>/dev/null | cut -f1)"
   ok "Локальный бэкап создан"
-  set_state SNAPSHOT_DONE 1
   log "[>] Запускаю контейнер после создания бэкапа…"
   docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
   sleep "$WAIT_AFTER_START"

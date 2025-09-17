@@ -52,6 +52,9 @@ import_backup_and_config() {
   [ -f "$cfg" ] || { err "Не найден $cfg"; exit 1; }
   local bk; bk="$(find_latest_backup_in_src)"; [ -n "$bk" ] || { err "В $BACKUPS_SRC нет *_gitlab_backup.tar*"; exit 1; }
 
+  log "[>] Найден архив бэкапа: $(basename "$bk")"
+  show_backup_overview "$bk"
+
   # Парсим TIMESTAMP и BASE_VER
   local fname ts y m d base rest
   fname="${bk##*/}"
@@ -472,6 +475,144 @@ ensure_initial_snapshot() {
   return 0
 }
 
+read_backup_metadata() {
+  local archive="$1" tmp
+  tmp="$(mktemp)" || return 1
+
+  if [[ "$archive" == *.tar.gz || "$archive" == *.tgz ]]; then
+    tar -xOzf "$archive" backup_information.yml >"$tmp" 2>/dev/null || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+  else
+    tar -xOf "$archive" backup_information.yml >"$tmp" 2>/dev/null || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+  fi
+
+  local gitlab_version db_version created_at backup_id
+  gitlab_version=$(sed -n 's/^:gitlab_version:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
+  db_version=$(sed -n 's/^:db_version:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
+  created_at=$(sed -n 's/^:backup_created_at:[[:space:]]*//p' "$tmp" | head -n1 || true)
+  if [ -z "${created_at// }" ]; then
+    created_at=$(sed -n 's/^:created_at:[[:space:]]*//p' "$tmp" | head -n1 || true)
+  fi
+  backup_id=$(sed -n 's/^:backup_id:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
+
+  rm -f "$tmp" 2>/dev/null || true
+
+  [ -n "${gitlab_version// }" ] && printf 'gitlab_version=%s\n' "$gitlab_version"
+  [ -n "${db_version// }" ] && printf 'db_version=%s\n' "$db_version"
+  [ -n "${created_at// }" ] && printf 'created_at=%s\n' "${created_at%%[$'\r\n']*}"
+  [ -n "${backup_id// }" ] && printf 'backup_id=%s\n' "$backup_id"
+  return 0
+}
+
+show_backup_overview() {
+  local archive="$1" prefix="${2:-  - }" label="${3:-Архив бэкапа}" sub_prefix="${4:-    • }"
+  [ -f "$archive" ] || { warn "Архив бэкапа не найден: $archive"; return; }
+
+  BACKUP_OVERVIEW_GITLAB=""
+  BACKUP_OVERVIEW_DB_VERSION=""
+  BACKUP_OVERVIEW_CREATED_AT=""
+  BACKUP_OVERVIEW_ID=""
+
+  local size base
+  size=$(du -h "$archive" 2>/dev/null | awk '{print $1}' || true)
+  base="$(basename "$archive")"
+  log "${prefix}${label}: ${base}"
+  log "${sub_prefix}Полный путь: $archive"
+  log "${sub_prefix}Размер: ${size:-unknown}"
+
+  local meta gitlab_version db_version created_at backup_id meta_ok=0
+  if meta=$(read_backup_metadata "$archive" 2>/dev/null); then
+    meta_ok=1
+    while IFS='=' read -r key value; do
+      case "$key" in
+        gitlab_version) gitlab_version="$value" ;;
+        db_version) db_version="$value" ;;
+        created_at) created_at="$value" ;;
+        backup_id) backup_id="$value" ;;
+      esac
+    done <<<"$meta"
+  fi
+
+  BACKUP_OVERVIEW_GITLAB="$gitlab_version"
+  BACKUP_OVERVIEW_DB_VERSION="$db_version"
+  BACKUP_OVERVIEW_CREATED_AT="$created_at"
+  BACKUP_OVERVIEW_ID="$backup_id"
+
+  if [ -n "$gitlab_version" ]; then
+    log "${sub_prefix}GitLab: $gitlab_version"
+  else
+    log "${sub_prefix}GitLab: неизвестно"
+    if [ "$meta_ok" -eq 0 ]; then
+      warn "Не удалось прочитать backup_information.yml из ${archive}"
+    else
+      warn "В backup_information.yml отсутствует ключ :gitlab_version"
+    fi
+  fi
+
+  if [ -n "$db_version" ]; then
+    log "${sub_prefix}Версия схемы БД: $db_version"
+  elif [ "$meta_ok" -eq 1 ]; then
+    log "${sub_prefix}Версия схемы БД: неизвестно"
+  fi
+
+  [ -n "$created_at" ] && log "${sub_prefix}Дата создания: $created_at"
+  [ -n "$backup_id" ] && log "${sub_prefix}Backup ID: $backup_id"
+}
+
+show_snapshot_overview() {
+  local snap="$1" snap_state="$2"
+  local snap_ts snap_ver snap_image
+
+  snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"
+  snap_ver="$(get_state_from_file "$snap_state" SNAPSHOT_VERSION || true)"
+  snap_image="$(get_state_from_file "$snap_state" SNAPSHOT_IMAGE || true)"
+
+  [ -n "$snap_ts" ] && log "  - Метка снапшота: $snap_ts"
+  [ -n "$snap_ver" ] && log "  - Версия GitLab (state): $snap_ver"
+  [ -n "$snap_image" ] && log "  - Образ контейнера: $snap_image"
+
+  local backup_file
+  backup_file=$(ls -1t "$snap/data/backups"/*_gitlab_backup.tar* 2>/dev/null | head -n1 || true)
+  if [ -n "$backup_file" ]; then
+    show_backup_overview "$backup_file" "  - " "Локальный архив бэкапа" "    • "
+    if [ -z "$snap_ver" ] && [ -n "$BACKUP_OVERVIEW_GITLAB" ]; then
+      log "  - Версия GitLab (по архиву): $BACKUP_OVERVIEW_GITLAB"
+    fi
+    if [ -n "$snap_ver" ] && [ -n "$BACKUP_OVERVIEW_GITLAB" ] && [ "$snap_ver" != "$BACKUP_OVERVIEW_GITLAB" ]; then
+      warn "Версия GitLab в state (${snap_ver}) отличается от backup_information.yml (${BACKUP_OVERVIEW_GITLAB})"
+    fi
+  fi
+
+  local repo_dir db_dir repo_size db_size repo_count wiki_count design_count
+  repo_dir="$snap/data/git-data/repositories"
+  db_dir="$snap/data/postgresql/data"
+
+  repo_size=$(du -sh "$repo_dir" 2>/dev/null | awk '{print $1}' || true)
+  db_size=$(du -sh "$db_dir" 2>/dev/null | awk '{print $1}' || true)
+
+  if [ -n "$repo_size" ] || [ -n "$db_size" ]; then
+    log "  - Размеры данных:"
+    [ -n "$repo_size" ] && log "      • Репозитории: $repo_size"
+    [ -n "$db_size" ] && log "      • PostgreSQL: $db_size"
+  fi
+
+  if [ -d "$repo_dir" ]; then
+    repo_count=$(find "$repo_dir" -type d -name '*.git' ! -name '*.wiki.git' ! -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}')
+    wiki_count=$(find "$repo_dir" -type d -name '*.wiki.git' -print 2>/dev/null | wc -l | awk '{print $1}')
+    design_count=$(find "$repo_dir" -type d -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}')
+    log "  - Репозитории (по директориям *.git):"
+    log "      • Основные: ${repo_count:-0}"
+    log "      • Wiki: ${wiki_count:-0}"
+    log "      • Design: ${design_count:-0}"
+  fi
+
+}
+
 restore_from_local_snapshot() {
   local snap="$BASE_SNAPSHOT_DIR" snap_state="$BASE_SNAPSHOT_DIR/state.env" snap_ver
   snap_ver="$(get_state_from_file "$snap_state" SNAPSHOT_VERSION || true)"
@@ -480,11 +621,9 @@ restore_from_local_snapshot() {
       ok "Локальный бэкап уже создан и актуален — пропускаю восстановление"
       return
     fi
-    local prompt="Найден локальный бэкап ${snap}"
-    if [ -n "$snap_ver" ]; then
-      prompt+=" (версия GitLab ${snap_ver})"
-    fi
-    prompt+=". Восстановить его?"
+    log "[>] Найден локальный бэкап ${snap}"
+    show_snapshot_overview "$snap" "$snap_state"
+    local prompt="Восстановить локальный бэкап?"
     if ask_yes_no "$prompt" "y"; then
       stop_container
       log "[>] Восстанавливаю каталоги из ${snap}"

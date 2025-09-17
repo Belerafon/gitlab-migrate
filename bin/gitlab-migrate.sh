@@ -13,6 +13,7 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/state.sh"
 . "$BASEDIR/lib/docker.sh"
 . "$BASEDIR/lib/dirs.sh"
+. "$BASEDIR/lib/stats.sh"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
 
@@ -117,8 +118,11 @@ main() {
 
   log "[>] Итоговая информация:"
   log "  - Текущая версия GitLab: $(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')"
-  log "  - Количество проектов: $(dexec 'gitlab-psql -d gitlabhq_production -t -c \"SELECT COUNT(*) FROM projects;\" 2>/dev/null | tr -d \"[:space:]\" || echo unknown')"
-  log "  - Количество пользователей: $(dexec 'gitlab-psql -d gitlabhq_production -t -c \"SELECT COUNT(*) FROM users;\" 2>/dev/null | tr -d \"[:space:]\" || echo unknown')"
+  log "  - Итоговая статистика:"
+  # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
+  declare -A final_stats=()
+  collect_gitlab_stats final_stats
+  print_gitlab_stats final_stats "    "
 
   log "[>] Проверка состояния служб:"
   dexec 'gitlab-ctl status' || true

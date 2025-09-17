@@ -50,18 +50,18 @@ generate_migration_report() {
   fi
 
   log "\nСтатистика восстановления:"
-  local project_count user_count issue_count repo_size db_size
-  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
-  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users WHERE state='\''active'\'';" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
-  issue_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM issues;" 2>/dev/null | tr -d "[:space:]" || echo "unknown"')
-  repo_size=$(dexec 'du -sh /var/opt/gitlab/git-data/repositories | cut -f1' 2>/dev/null || echo "unknown")
-  db_size=$(dexec 'du -sh /var/opt/gitlab/postgresql/data | cut -f1' 2>/dev/null || echo "unknown")
+  # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
+  declare -A report_stats=()
+  collect_gitlab_stats report_stats
+  print_gitlab_stats report_stats "  "
 
-  log "  - Проекты: $project_count"
-  log "  - Активные пользователи: $user_count"
-  log "  - Задачи: $issue_count"
-  log "  - Размер репозиториев: $repo_size"
-  log "  - Размер базы данных: $db_size"
+  local repo_size_disk db_size_disk
+  repo_size_disk=$(dexec 'du -sh /var/opt/gitlab/git-data/repositories | cut -f1' 2>/dev/null || echo "unknown")
+  db_size_disk=$(dexec 'du -sh /var/opt/gitlab/postgresql/data | cut -f1' 2>/dev/null || echo "unknown")
+
+  log "\nРазмер данных на диске:"
+  log "  - Git репозитории: $repo_size_disk"
+  log "  - PostgreSQL: $db_size_disk"
 
   log "\nСостояние служб:"
   dexec 'gitlab-ctl status' 2>/dev/null | sed 's/^/  - /' || log "  - Службы недоступны"

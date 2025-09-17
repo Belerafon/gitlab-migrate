@@ -385,19 +385,58 @@ verify_restore_success() {
   fi
 
   log "[>] Проверка состояния базы данных…"
-  local project_count user_count issue_count
-  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
-  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
-  issue_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM issues;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
-  
-  if [ "${project_count:-0}" -gt 0 ]; then
-    ok "База данных содержит ${project_count} проектов"
+  # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
+  declare -A restore_stats=()
+  collect_gitlab_stats restore_stats
+
+  local projects_raw="${restore_stats[projects_total]-}"
+  local projects_display
+  projects_display=$(stats_format_value "$projects_raw")
+  if stats_value_is_number "$projects_raw" && [ "$projects_raw" -gt 0 ]; then
+    ok "База данных содержит ${projects_display} проектов"
   else
-    warn "База данных пуста или недоступна"
+    warn "База данных пуста или недоступна (проекты: ${projects_display})"
   fi
 
-  log "  - Пользователи: $user_count"
-  log "  - Ишью: $issue_count"
+  if stats_value_available "${restore_stats[repositories_with_data]-}"; then
+    log "  - Репозитории с данными: $(stats_format_value "${restore_stats[repositories_with_data]-}")"
+  fi
+
+  local users_line
+  users_line=$(stats_format_value "${restore_stats[users_total]-}")
+  if stats_value_available "${restore_stats[users_active]-}"; then
+    users_line+=" (активные: $(stats_format_value "${restore_stats[users_active]-}"))"
+  fi
+  log "  - Пользователи: ${users_line}"
+  log "  - Ишью: $(stats_format_value "${restore_stats[issues_total]-}")"
+  log "  - Merge Requests: $(stats_format_value "${restore_stats[merge_requests_total]-}")"
+  log "  - Размер базы данных: $(stats_format_value "${restore_stats[db_size]-}")"
+
+  if stats_value_available "${restore_stats[storage_total]-}"; then
+    log "  - Хранилища проектов: $(stats_format_value "${restore_stats[storage_total]-}")"
+    local storage_indent="      "
+    if stats_value_available "${restore_stats[repos_size]-}"; then
+      log "${storage_indent}· Репозитории: $(stats_format_value "${restore_stats[repos_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[wiki_size]-}"; then
+      log "${storage_indent}· Вики: $(stats_format_value "${restore_stats[wiki_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[lfs_size]-}"; then
+      log "${storage_indent}· LFS: $(stats_format_value "${restore_stats[lfs_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[artifacts_size]-}"; then
+      log "${storage_indent}· Артефакты: $(stats_format_value "${restore_stats[artifacts_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[packages_size]-}"; then
+      log "${storage_indent}· Пакеты: $(stats_format_value "${restore_stats[packages_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[uploads_size]-}"; then
+      log "${storage_indent}· Загрузки: $(stats_format_value "${restore_stats[uploads_size]-}")"
+    fi
+    if stats_value_available "${restore_stats[snippets_size]-}"; then
+      log "${storage_indent}· Сниппеты: $(stats_format_value "${restore_stats[snippets_size]-}")"
+    fi
+  fi
 
   log "[>] Проверка веб‑интерфейса…"
   local http_status
@@ -411,7 +450,7 @@ verify_restore_success() {
   log "[>] Проверка фоновых миграций…"
   dexec 'gitlab-rake gitlab:background_migrations:status' || true
 
-  log "[>] Размер восстановленных данных:"
+  log "[>] Размер восстановленных данных на диске:"
   dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'
   dexec 'du -sh /var/opt/gitlab/postgresql/data | awk '\''{print "  - База данных: "$1}'\'' || true'
 

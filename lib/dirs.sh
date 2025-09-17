@@ -42,7 +42,10 @@ ensure_dirs() {
       ok "Сохраняю существующие каталоги."
     fi
   fi
+  # config оставляем доступным только root, а data/logs должны быть x-доступны
+  # для uid GitLab внутри контейнера (uid=998), иначе PostgreSQL не сможет
+  # дойти до /var/opt/gitlab после повторного запуска скрипта.
   chmod 700 "$DATA_ROOT/config"
-  chmod 750 "$DATA_ROOT"/{data,logs}
+  chmod 755 "$DATA_ROOT"/{data,logs}
   chown -R root:root "$DATA_ROOT/config"
 }

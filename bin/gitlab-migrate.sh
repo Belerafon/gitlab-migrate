@@ -88,9 +88,7 @@ main() {
     ok "Проверка восстановления уже выполнена — пропускаю"
   fi
 
-  if [ "$(get_state SNAPSHOT_DONE || true)" != "1" ]; then
-    snapshot_local_backup
-    ok "Снимок данных создан. Запустите скрипт снова для продолжения миграции"
+  if ensure_initial_snapshot; then
     exit 0
   fi
 

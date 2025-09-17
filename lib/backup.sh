@@ -9,7 +9,19 @@ run_reconfigure() {
   local rlog_host="${DATA_ROOT}/logs/reconfigure.log"
   rm -f "$rlog_host" 2>/dev/null || true
 
-  if dexec "set -o pipefail; $cmd |& grep -Ev '(skipped due to|up to date)' | tee '$rlog_container'"; then
+  local filter_script
+  filter_script=$(cat <<'EOF'
+awk 'BEGIN {IGNORECASE=1}
+  /^(Starting Chef Infra Client|Chef Infra Client finished|Running handlers|Running handlers complete)/ {print "[chef] " $0; fflush(); next}
+  /^Recipe: / {print "[chef] " $0; fflush(); next}
+  index($0, "error") || index($0, "warn") || index($0, "fatal") || index($0, "critical") {print "[chef] " $0; fflush(); next}
+'
+EOF
+  )
+
+  log "[>] Выполняю ${cmd} (подробный лог: ${rlog_host})"
+
+  if dexec "set -o pipefail; $cmd |& tee '$rlog_container' | $filter_script"; then
     tail -n 20 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
     return 0
   else
@@ -406,36 +418,74 @@ verify_restore_success() {
 
 BASE_SNAPSHOT_DIR="${DATA_ROOT}-snapshot"
 
-snapshot_local_backup() {
-  [ "$(get_state SNAPSHOT_DONE || true)" = "1" ] && { ok "Локальный бэкап уже создан — пропускаю"; return; }
+current_gitlab_version() {
+  dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo "unknown"' 2>/dev/null
+}
+
+current_image_tag() {
+  docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+create_snapshot() {
+  local current_version="$1" image_tag snapshot_ts
+  current_version="${current_version:-$(current_gitlab_version)}"
+  current_version="${current_version:-unknown}"
+  image_tag="$(current_image_tag)"; image_tag="${image_tag:-unknown}"
+  snapshot_ts="$(date +%Y%m%d-%H%M%S)"
+
   log "[>] Останавливаю контейнер перед созданием локального бэкапа…"
   docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
   sleep 5
+
   log "[>] Копирую каталоги ${DATA_ROOT} → ${BASE_SNAPSHOT_DIR}"
   rm -rf "$BASE_SNAPSHOT_DIR" 2>/dev/null || true
   mkdir -p "$BASE_SNAPSHOT_DIR"
   cp -a "$DATA_ROOT"/{config,data,logs} "$BASE_SNAPSHOT_DIR/"
-  # Отмечаем создание снапшота до копирования state.env,
-  # чтобы восстановленный state отражал завершённый бэкап
+
   set_state SNAPSHOT_DONE 1
+  set_state SNAPSHOT_VERSION "$current_version"
+  set_state SNAPSHOT_IMAGE "$image_tag"
+  set_state SNAPSHOT_TS "$snapshot_ts"
   cp -a "$STATE_FILE" "$BASE_SNAPSHOT_DIR/state.env" 2>/dev/null || true
+
+  log "  - Метка снапшота: ${snapshot_ts}"
+  log "  - Версия GitLab: ${current_version}"
+  log "  - Образ контейнера: ${image_tag}"
   log "  - Размер репозиториев: $(du -sh "$BASE_SNAPSHOT_DIR/data/git-data/repositories" 2>/dev/null | cut -f1)"
   log "  - Размер базы данных: $(du -sh "$BASE_SNAPSHOT_DIR/data/postgresql/data" 2>/dev/null | cut -f1)"
-  ok "Локальный бэкап создан"
+  ok "Локальный бэкап обновлён (GitLab ${current_version})"
+
   log "[>] Запускаю контейнер после создания бэкапа…"
   docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
   sleep "$WAIT_AFTER_START"
   ensure_permissions
 }
 
+ensure_initial_snapshot() {
+  if [ "$(get_state SNAPSHOT_DONE || true)" = "1" ]; then
+    ok "Локальный бэкап уже создан и актуален — пропускаю"
+    return 1
+  fi
+
+  create_snapshot
+  ok "Снимок данных создан. Запустите скрипт снова для продолжения миграции"
+  return 0
+}
+
 restore_from_local_snapshot() {
-  local snap="$BASE_SNAPSHOT_DIR"
+  local snap="$BASE_SNAPSHOT_DIR" snap_state="$BASE_SNAPSHOT_DIR/state.env" snap_ver
+  snap_ver="$(get_state_from_file "$snap_state" SNAPSHOT_VERSION || true)"
   if [ -d "$snap/config" ] && [ -d "$snap/data" ]; then
     if [ "$(get_state SNAPSHOT_DONE || true)" = "1" ]; then
       ok "Локальный бэкап уже создан и актуален — пропускаю восстановление"
       return
     fi
-    if ask_yes_no "Найден локальный бэкап ${snap}. Восстановить его?" "y"; then
+    local prompt="Найден локальный бэкап ${snap}"
+    if [ -n "$snap_ver" ]; then
+      prompt+=" (версия GitLab ${snap_ver})"
+    fi
+    prompt+=". Восстановить его?"
+    if ask_yes_no "$prompt" "y"; then
       stop_container
       log "[>] Восстанавливаю каталоги из ${snap}"
       rm -rf "$DATA_ROOT"/config "$DATA_ROOT"/data "$DATA_ROOT"/logs
@@ -443,6 +493,18 @@ restore_from_local_snapshot() {
       cp -a "$snap"/{config,data,logs} "$DATA_ROOT/"
       cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
       set_state BASE_STARTED 0
+      local snap_ts snap_image
+      snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"
+      snap_image="$(get_state_from_file "$snap_state" SNAPSHOT_IMAGE || true)"
+      if [ -n "$snap_ts" ]; then
+        log "  - Метка снапшота: ${snap_ts}"
+      fi
+      if [ -n "$snap_ver" ]; then
+        log "  - Версия GitLab: ${snap_ver}"
+      fi
+      if [ -n "$snap_image" ]; then
+        log "  - Образ контейнера: ${snap_image}"
+      fi
       log "  - Размер репозиториев: $(du -sh "$DATA_ROOT/data/git-data/repositories" 2>/dev/null | cut -f1)"
       log "  - Размер базы данных: $(du -sh "$DATA_ROOT/data/postgresql/data" 2>/dev/null | cut -f1)"
       ok "Каталоги восстановлены из локального бэкапа"

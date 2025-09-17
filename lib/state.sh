@@ -7,6 +7,12 @@ ask_yes_no() {
   [[ "$a" =~ ^[Yy]$ ]]
 }
 
+get_state_from_file() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 1
+  grep -E "^${key}=" "$file" | tail -n1 | cut -d= -f2-
+}
+
 state_init() { [ -f "$STATE_FILE" ] || echo "# gitlab migration state" > "$STATE_FILE"; }
 state_clear(){ rm -f "$STATE_FILE"; echo "# gitlab migration state" > "$STATE_FILE"; }
 get_state()  { [ -f "$STATE_FILE" ] && grep -E "^$1=" "$STATE_FILE" | tail -n1 | cut -d= -f2- || true; }

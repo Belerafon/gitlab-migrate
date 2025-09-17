@@ -41,6 +41,25 @@ stats_value_is_number() {
   [[ "$value" =~ ^[0-9]+$ ]]
 }
 
+# Список метрик хранилища, которые не выводим для экономии места.
+STATS_SUPPRESSED_STORAGE_METRICS=(
+  "lfs_size"
+  "artifacts_size"
+  "packages_size"
+  "uploads_size"
+  "snippets_size"
+)
+
+stats_storage_metric_visible() {
+  local metric="$1" suppressed
+  for suppressed in "${STATS_SUPPRESSED_STORAGE_METRICS[@]}"; do
+    if [ "$suppressed" = "$metric" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 # Collect GitLab statistics into the provided associative array reference.
 # shellcheck disable=SC2154
 collect_gitlab_stats() {
@@ -107,19 +126,19 @@ print_gitlab_stats() {
   if stats_value_available "${_stats[wiki_size]-}"; then
     log "${subindent}· Вики: $(stats_format_value "${_stats[wiki_size]-}")"
   fi
-  if stats_value_available "${_stats[lfs_size]-}"; then
+  if stats_storage_metric_visible "lfs_size" && stats_value_available "${_stats[lfs_size]-}"; then
     log "${subindent}· LFS: $(stats_format_value "${_stats[lfs_size]-}")"
   fi
-  if stats_value_available "${_stats[artifacts_size]-}"; then
+  if stats_storage_metric_visible "artifacts_size" && stats_value_available "${_stats[artifacts_size]-}"; then
     log "${subindent}· Артефакты: $(stats_format_value "${_stats[artifacts_size]-}")"
   fi
-  if stats_value_available "${_stats[packages_size]-}"; then
+  if stats_storage_metric_visible "packages_size" && stats_value_available "${_stats[packages_size]-}"; then
     log "${subindent}· Пакеты: $(stats_format_value "${_stats[packages_size]-}")"
   fi
-  if stats_value_available "${_stats[uploads_size]-}"; then
+  if stats_storage_metric_visible "uploads_size" && stats_value_available "${_stats[uploads_size]-}"; then
     log "${subindent}· Загрузки: $(stats_format_value "${_stats[uploads_size]-}")"
   fi
-  if stats_value_available "${_stats[snippets_size]-}"; then
+  if stats_storage_metric_visible "snippets_size" && stats_value_available "${_stats[snippets_size]-}"; then
     log "${subindent}· Сниппеты: $(stats_format_value "${_stats[snippets_size]-}")"
   fi
 }

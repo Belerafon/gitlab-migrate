@@ -14,6 +14,7 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/docker.sh"
 . "$BASEDIR/lib/dirs.sh"
 . "$BASEDIR/lib/stats.sh"
+. "$BASEDIR/lib/health.sh"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
 

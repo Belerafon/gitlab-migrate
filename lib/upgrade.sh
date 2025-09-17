@@ -24,6 +24,43 @@ compute_stops() {
   [ "$DO_TARGET_17" = "yes" ] && echo "17"
 }
 
+prompt_snapshot_after_upgrade() {
+  local current_version="$1" target_tag="$2"
+  local snapshot_version snapshot_display prompt snapshot_ts snapshot_image
+
+  current_version="${current_version:-$(current_gitlab_version)}"
+  snapshot_version="$(get_state SNAPSHOT_VERSION || true)"
+  snapshot_ts="$(get_state SNAPSHOT_TS || true)"
+  snapshot_image="$(get_state SNAPSHOT_IMAGE || true)"
+
+  if [ -z "$snapshot_version" ]; then
+    snapshot_display="нет"
+  else
+    snapshot_display="$snapshot_version"
+  fi
+
+  log "[>] Состояние перед созданием снапшота:"
+  log "    - Текущая версия GitLab: ${current_version}"
+  log "    - Версия в локальном снимке: ${snapshot_display}"
+  if [ -n "$snapshot_ts" ]; then
+    log "    - Метка последнего снапшота: ${snapshot_ts}"
+  fi
+  if [ -n "$snapshot_image" ]; then
+    log "    - Образ в последнем снапшоте: ${snapshot_image}"
+  fi
+
+  prompt="Создать локальный снапшот? (текущая: ${current_version}; в снимке: ${snapshot_display})"
+  if ask_yes_no "$prompt" "y"; then
+    log "[>] Создаю локальный снапшот после апгрейда до ${target_tag}"
+    create_snapshot "$current_version"
+    wait_gitlab_ready
+    wait_postgres_ready
+    ok "Снимок после обновления сохранён"
+  else
+    log "[>] Пользователь пропустил создание снапшота; в наличии версия ${snapshot_display}"
+  fi
+}
+
 # Проверяет версию PostgreSQL и при необходимости выполняет pg-upgrade
 ensure_postgres_at_least() {
   local required="$1" series="$2"
@@ -55,24 +92,65 @@ ensure_postgres_at_least() {
   if [[ -n "$pg_major" ]] && [[ "$pg_major" -lt "$required" ]]; then
     log "  выполняю gitlab-ctl reconfigure (подготовка к pg-upgrade)"
     run_reconfigure || exit 1
-    local new_pg_ver new_pg_major new_bin_dir
+    local new_pg_ver available_bins new_pg_major="" new_bin_dir pg_upgrade_help supports_bindir=0 upgrade_command data_pg_ver
     new_pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
-    new_pg_major="${new_pg_ver%%.*}"
-    new_bin_dir="/opt/gitlab/embedded/postgresql/${new_pg_major}/bin"
     log "  версия после reconfigure: ${new_pg_ver:-unknown}"
+
+    available_bins=$(dexec "ls -1 /opt/gitlab/embedded/postgresql 2>/dev/null | sort -n" 2>/dev/null || true)
+    local formatted_bins
+    formatted_bins="${available_bins//$'\n'/, }"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      [[ "$line" =~ ^[0-9]+$ ]] || continue
+      if [ "$line" -gt "$pg_major" ]; then
+        new_pg_major="$line"
+        break
+      fi
+    done <<< "$available_bins"
+
+    if [ -z "$new_pg_major" ]; then
+      err "После reconfigure не найдена новая версия PostgreSQL (ожидалась >= ${required}). Каталоги: ${formatted_bins}"
+      exit 1
+    fi
+
+    if [ "$new_pg_major" -lt "$required" ]; then
+      err "Доступная версия PostgreSQL ${new_pg_major} меньше требуемой ${required}."
+      exit 1
+    fi
+
+    new_bin_dir="/opt/gitlab/embedded/postgresql/${new_pg_major}/bin"
     log "  старый путь бинарников: ${old_bin_dir}"
     log "  новый путь бинарников: ${new_bin_dir}"
+
     dexec "[ -d '${old_bin_dir}' ]" || { err "Не найден каталог старых бинарников: ${old_bin_dir}"; exit 1; }
     dexec "[ -d '${new_bin_dir}' ]" || { err "Не найден каталог новых бинарников: ${new_bin_dir}"; exit 1; }
-    log "  выполняю gitlab-ctl pg-upgrade"
+
+    pg_upgrade_help="$(dexec 'gitlab-ctl pg-upgrade --help' 2>/dev/null || true)"
+    if printf '%s' "$pg_upgrade_help" | grep -q -- '--old-bindir'; then
+      supports_bindir=1
+    fi
+
+    if [ "$supports_bindir" -eq 1 ]; then
+      upgrade_command="gitlab-ctl pg-upgrade --old-bindir='${old_bin_dir}' --new-bindir='${new_bin_dir}'"
+    else
+      upgrade_command="gitlab-ctl pg-upgrade -V ${new_pg_major}"
+    fi
+
+    log "  выполняю ${upgrade_command}"
     local pg_log_container="/var/log/gitlab/pg-upgrade.log"
     local pg_log_host="${DATA_ROOT}/logs/pg-upgrade.log"
     rm -f "$pg_log_host" 2>/dev/null || true
-    if dexec "gitlab-ctl pg-upgrade --old-bindir='${old_bin_dir}' --new-bindir='${new_bin_dir}' 2>&1 | tee '${pg_log_container}'"; then
+    if dexec "set -o pipefail; ${upgrade_command} 2>&1 | tee '${pg_log_container}'"; then
       dexec "tail -n 20 '${pg_log_container}'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
       wait_postgres_ready
       pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
+      data_pg_ver=$(dexec 'cat /var/opt/gitlab/postgresql/data/PG_VERSION 2>/dev/null || echo unknown')
       log "  версия после pg-upgrade: ${pg_ver:-unknown}"
+      log "  версия данных после pg-upgrade: ${data_pg_ver:-unknown}"
+      if [ "${pg_ver%%.*}" -lt "$required" ] || [ "${data_pg_ver%%.*}" -lt "$required" ]; then
+        err "pg-upgrade завершился, но версия осталась ${pg_ver:-unknown} (данные ${data_pg_ver:-unknown})."
+        exit 1
+      fi
       ok "PostgreSQL обновлён"
     else
       dexec "tail -n 50 '${pg_log_container}'" 2>/dev/null | sed -e 's/^/    /' || warn "лог pg-upgrade (в контейнере) не найден"
@@ -147,7 +225,9 @@ upgrade_to_series() {
         exit 1
       fi
     fi
-  
+
+    prompt_snapshot_after_upgrade "$current_version" "$target"
+
     log "[>] Пауза ${WAIT_BETWEEN_STEPS}s"; sleep "$WAIT_BETWEEN_STEPS"
     set_state LAST_UPGRADED_TO "$target"
 }

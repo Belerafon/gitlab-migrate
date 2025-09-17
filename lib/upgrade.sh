@@ -198,6 +198,12 @@ upgrade_to_series() {
       log "  все миграции применены"
     fi
     log "  итого: up=$up_count, down=$down_count"
+
+    log "  статистика GitLab:"
+    # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
+    declare -A upgrade_stats=()
+    collect_gitlab_stats upgrade_stats
+    print_gitlab_stats upgrade_stats "    "
   
     log "[>] Статус фоновых миграций (если задача есть):"
     if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then

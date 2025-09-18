@@ -109,6 +109,7 @@ main() {
       cM="${cur_ver%%.*}"; [ "$cM" -ge 17 ] && { ok "Текущая $cur_ver >= 17.x — пропускаю"; continue; }
     fi
     upgrade_to_series "$s"
+    pause_after_upgrade_step "$(get_state LAST_UPGRADED_TO || true)"
   done
 
   log "[>] Финальная проверка после всех апгрейдов…"

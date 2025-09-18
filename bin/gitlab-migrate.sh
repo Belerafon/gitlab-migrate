@@ -13,8 +13,6 @@ BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$BASEDIR/lib/state.sh"
 . "$BASEDIR/lib/docker.sh"
 . "$BASEDIR/lib/dirs.sh"
-. "$BASEDIR/lib/stats.sh"
-. "$BASEDIR/lib/health.sh"
 . "$BASEDIR/lib/backup.sh"
 . "$BASEDIR/lib/upgrade.sh"
 
@@ -23,19 +21,8 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/gitlab-migrate-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-SCRIPT_REVISION="unknown"
-if command -v git >/dev/null 2>&1; then
-  if git -C "$BASEDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    SCRIPT_REVISION="$(git -C "$BASEDIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
-  fi
-fi
-
-log "[>] gitlab-migrate: запуск скрипта (rev=${SCRIPT_REVISION})"
-
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0
-INITIAL_ACTION=""
-SNAPSHOT_INFO_ALREADY_SHOWN=0
 
 . "$BASEDIR/lib/runtime.sh"
 
@@ -56,46 +43,8 @@ main() {
     esac
   done
 
-  need_root
+  need_root; need_cmd docker; docker_ok || { err "Docker daemon недоступен"; exit 1; }
   state_init
-
-  prompt_initial_action
-
-  if [ "${PROMPT_INITIAL_ACTION_STATUS:-ok}" != "ok" ]; then
-    err "Интерактивный выбор действия не выполнен: ${PROMPT_INITIAL_ACTION_ERROR:-неизвестная причина}"
-    warn "Запустите скрипт в интерактивной сессии или задайте GITLAB_MIGRATE_ACTION=continue|snapshot|exit"
-    trap - ERR
-    exit 1
-  fi
-
-  case "$INITIAL_ACTION" in
-    exit)
-      ok "Завершение по запросу пользователя"
-      return 0 ;;
-    snapshot)
-      if ! ensure_docker_available; then
-        # Завершаем без ERR trap, чтобы не дергать Docker диагностикой до явного запуска
-        trap - ERR
-        exit 1
-      fi
-      if snapshot_only_mode; then
-        return 0
-      else
-        err "Не удалось создать локальный снапшот"
-        return 1
-      fi ;;
-    continue|'')
-      : ;; # продолжаем обычный сценарий
-    *)
-      err "Неизвестное действие: ${INITIAL_ACTION}"
-      return 1 ;;
-  esac
-
-  if ! ensure_docker_available; then
-    # Завершаем без ERR trap, чтобы не дергать Docker диагностикой до явного запуска
-    trap - ERR
-    exit 1
-  fi
 
   ensure_dirs
   restore_from_local_snapshot
@@ -117,16 +66,7 @@ main() {
     fi
   fi
 
-  local base_started
-  base_started="$(get_state BASE_STARTED || true)"
-
-  if [ "$base_started" = "1" ] && ! container_running; then
-    warn "state сообщает, что базовый контейнер запущен, но Docker его не находит — переинициализирую запуск"
-    base_started="0"
-    set_state BASE_STARTED 0
-  fi
-
-  if [ "$base_started" != "1" ]; then
+  if [ "$(get_state BASE_STARTED || true)" != "1" ]; then
     run_container "$base_tag"
     set_state BASE_STARTED 1
   else
@@ -177,11 +117,8 @@ main() {
 
   log "[>] Итоговая информация:"
   log "  - Текущая версия GitLab: $(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')"
-  log "  - Итоговая статистика:"
-  # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
-  declare -A final_stats=()
-  collect_gitlab_stats final_stats
-  print_gitlab_stats final_stats "    "
+  log "  - Количество проектов: $(dexec 'gitlab-psql -d gitlabhq_production -t -c \"SELECT COUNT(*) FROM projects;\" 2>/dev/null | tr -d \"[:space:]\" || echo unknown')"
+  log "  - Количество пользователей: $(dexec 'gitlab-psql -d gitlabhq_production -t -c \"SELECT COUNT(*) FROM users;\" 2>/dev/null | tr -d \"[:space:]\" || echo unknown')"
 
   log "[>] Проверка состояния служб:"
   dexec 'gitlab-ctl status' || true

@@ -68,7 +68,16 @@ main() {
     fi
   fi
 
-  if [ "$(get_state BASE_STARTED || true)" != "1" ]; then
+  local base_started
+  base_started="$(get_state BASE_STARTED || true)"
+
+  if [ "$base_started" = "1" ] && ! container_running; then
+    warn "state сообщает, что базовый контейнер запущен, но Docker его не находит — переинициализирую запуск"
+    base_started="0"
+    set_state BASE_STARTED 0
+  fi
+
+  if [ "$base_started" != "1" ]; then
     run_container "$base_tag"
     set_state BASE_STARTED 1
   else

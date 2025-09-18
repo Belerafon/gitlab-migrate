@@ -627,12 +627,28 @@ show_snapshot_overview() {
     fi
   fi
 
-  local repo_dir db_dir repo_size db_size repo_count wiki_count design_count
+  local repo_dir db_dir repo_size db_size repo_count wiki_count design_count size_line
   repo_dir="$snap/data/git-data/repositories"
   db_dir="$snap/data/postgresql/data"
 
-  repo_size=$(du -sh "$repo_dir" 2>/dev/null | awk '{print $1}' || true)
-  db_size=$(du -sh "$db_dir" 2>/dev/null | awk '{print $1}' || true)
+  repo_size=""
+  db_size=""
+
+  if [ -d "$repo_dir" ]; then
+    if size_line=$(du -sh "$repo_dir" 2>/dev/null); then
+      repo_size="${size_line%%$'\t'*}"
+    else
+      warn "Не удалось определить размер репозиториев в $repo_dir"
+    fi
+  fi
+
+  if [ -d "$db_dir" ]; then
+    if size_line=$(du -sh "$db_dir" 2>/dev/null); then
+      db_size="${size_line%%$'\t'*}"
+    else
+      warn "Не удалось определить размер базы данных в $db_dir"
+    fi
+  fi
 
   if [ -n "$repo_size" ] || [ -n "$db_size" ]; then
     log "  - Размеры данных:"
@@ -641,13 +657,36 @@ show_snapshot_overview() {
   fi
 
   if [ -d "$repo_dir" ]; then
-    repo_count=$(find "$repo_dir" -type d -name '*.git' ! -name '*.wiki.git' ! -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}')
-    wiki_count=$(find "$repo_dir" -type d -name '*.wiki.git' -print 2>/dev/null | wc -l | awk '{print $1}')
-    design_count=$(find "$repo_dir" -type d -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}')
+    local counts_ok=1
+    if repo_count=$(find "$repo_dir" -type d -name '*.git' ! -name '*.wiki.git' ! -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
+      :
+    else
+      counts_ok=0
+      repo_count="unknown"
+    fi
+
+    if wiki_count=$(find "$repo_dir" -type d -name '*.wiki.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
+      :
+    else
+      counts_ok=0
+      wiki_count="unknown"
+    fi
+
+    if design_count=$(find "$repo_dir" -type d -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
+      :
+    else
+      counts_ok=0
+      design_count="unknown"
+    fi
+
     log "  - Репозитории (по директориям *.git):"
     log "      • Основные: ${repo_count:-0}"
     log "      • Wiki: ${wiki_count:-0}"
     log "      • Design: ${design_count:-0}"
+
+    if [ $counts_ok -eq 0 ]; then
+      warn "Не удалось корректно подсчитать количество репозиториев (возможно, отсутствуют права доступа)"
+    fi
   fi
 
 }

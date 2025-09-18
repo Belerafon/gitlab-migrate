@@ -19,6 +19,64 @@ cleanup_previous_run() {
   trap 'rm -f "$LOCK_FILE"; log "Лог файл: $LOG_FILE"' EXIT
 }
 
+prompt_initial_action() {
+  local snapshot_dir="$BASE_SNAPSHOT_DIR"
+  local snapshot_state="$BASE_SNAPSHOT_DIR/state.env"
+  local has_snapshot=0 choice=""
+
+  if [ -d "$snapshot_dir/config" ] && [ -d "$snapshot_dir/data" ]; then
+    has_snapshot=1
+    log "[>] Найден локальный бэкап ${snapshot_dir}"
+    show_snapshot_overview "$snapshot_dir" "$snapshot_state"
+    SNAPSHOT_INFO_ALREADY_SHOWN=1
+  else
+    log "[i] Локальный бэкап ${snapshot_dir} не найден или неполон"
+  fi
+
+  log ""
+  log "Выберите дальнейшее действие:"
+  if [ "$has_snapshot" -eq 1 ]; then
+    log "  1) Продолжить миграцию (использовать найденный снапшот при необходимости)"
+    log "  2) Создать/обновить локальный снапшот и завершить работу"
+    log "  3) Ничего не делать и выйти"
+  else
+    log "  1) Продолжить миграцию (будут использованы архивы из $BACKUPS_SRC)"
+    log "  2) Попробовать создать первичный локальный снапшот и завершить работу"
+    log "  3) Выйти"
+  fi
+
+  while true; do
+    read -r -p "Выбор [1-3]: " choice || choice=""
+    choice="${choice:-1}"
+    case "$choice" in
+      1) INITIAL_ACTION="continue"; return 0 ;;
+      2) INITIAL_ACTION="snapshot";  return 0 ;;
+      3) INITIAL_ACTION="exit";      return 0 ;;
+      *) log "Введите 1, 2 или 3." ;;
+    esac
+  done
+}
+
+snapshot_only_mode() {
+  local missing=()
+  for d in config data logs; do
+    if [ ! -d "$DATA_ROOT/$d" ]; then
+      missing+=("$DATA_ROOT/$d")
+    fi
+  done
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    err "Нельзя создать снапшот — отсутствуют каталоги: ${missing[*]}"
+    warn "Убедитесь, что GitLab уже развернут и каталоги данных доступны по пути $DATA_ROOT"
+    return 1
+  fi
+
+  log "[>] Создаю локальный снапшот и завершаю работу по запросу пользователя"
+  create_snapshot
+  ok "Снимок данных обновлён. Скрипт завершает работу"
+  return 0
+}
+
 reset_migration() {
   log "[!] Сброс миграции: удаление контейнеров, данных и состояния"
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -78,7 +136,11 @@ error_trap() {
   trap - ERR
   set +e
   warn "Ошибка на шаге. См. статус служб ниже:"
-  (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2
+  if container_running; then
+    (dexec "gitlab-ctl status" || true) 2>&1 | sed -e "s/^/[status] /" >&2
+  else
+    log "[status] gitlab-ctl status недоступен: контейнер ${CONTAINER_NAME} не запущен"
+  fi
 
   log "[status] ------ Статус контейнера ------"
   docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 | sed -e "s/^/[status] /" >&2 || true

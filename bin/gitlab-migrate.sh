@@ -52,6 +52,13 @@ main() {
 
   prompt_initial_action
 
+  if [ "${PROMPT_INITIAL_ACTION_STATUS:-ok}" != "ok" ]; then
+    err "Интерактивный выбор действия не выполнен: ${PROMPT_INITIAL_ACTION_ERROR:-неизвестная причина}"
+    warn "Запустите скрипт в интерактивной сессии или задайте GITLAB_MIGRATE_ACTION=continue|snapshot|exit"
+    trap - ERR
+    exit 1
+  fi
+
   case "$INITIAL_ACTION" in
     exit)
       ok "Завершение по запросу пользователя"

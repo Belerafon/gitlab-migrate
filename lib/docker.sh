@@ -125,11 +125,31 @@ ensure_permissions() {
 }
 
 wait_gitlab_ready() {
-  log "[>] Ожидаю готовность gitlab-ctl status…"
+  local timeout=${READY_TIMEOUT:-900}
+  local progress=${READY_STATUS_INTERVAL:-30}
+  log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${timeout}s)…"
   local waited=0
+  local last_report=0
+  local fmt_total="∞"
+  if [ "$timeout" -gt 0 ]; then
+    fmt_total=$(printf "%02d:%02d" $((timeout / 60)) $((timeout % 60)))
+  fi
   until dexec 'gitlab-ctl status >/dev/null 2>&1'; do
     sleep 3; waited=$((waited+3))
-    [ "$waited" -ge "$READY_TIMEOUT" ] && { warn "gitlab-ctl status не ответил за ${READY_TIMEOUT}s — продолжу"; return 0; }
+    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+      warn "gitlab-ctl status не ответил за ${timeout}s — продолжу"
+      return 0
+    fi
+    if [ "$progress" -gt 0 ] && [ $((waited - last_report)) -ge "$progress" ]; then
+      local fmt_waited
+      fmt_waited=$(printf "%02d:%02d" $((waited / 60)) $((waited % 60)))
+      if [ "$timeout" -gt 0 ]; then
+        log "    …жду уже ${fmt_waited} из ${fmt_total}"
+      else
+        log "    …жду уже ${fmt_waited}"
+      fi
+      last_report=$waited
+    fi
   done
   ok "gitlab-ctl status OK"
 }

@@ -52,9 +52,6 @@ import_backup_and_config() {
   [ -f "$cfg" ] || { err "Не найден $cfg"; exit 1; }
   local bk; bk="$(find_latest_backup_in_src)"; [ -n "$bk" ] || { err "В $BACKUPS_SRC нет *_gitlab_backup.tar*"; exit 1; }
 
-  log "[>] Найден архив бэкапа: $(basename "$bk")"
-  show_backup_overview "$bk"
-
   # Парсим TIMESTAMP и BASE_VER
   local fname ts y m d base rest
   fname="${bk##*/}"
@@ -385,58 +382,19 @@ verify_restore_success() {
   fi
 
   log "[>] Проверка состояния базы данных…"
-  # shellcheck disable=SC2034 # используется через nameref в collect_gitlab_stats
-  declare -A restore_stats=()
-  collect_gitlab_stats restore_stats
-
-  local projects_raw="${restore_stats[projects_total]-}"
-  local projects_display
-  projects_display=$(stats_format_value "$projects_raw")
-  if stats_value_is_number "$projects_raw" && [ "$projects_raw" -gt 0 ]; then
-    ok "База данных содержит ${projects_display} проектов"
+  local project_count user_count issue_count
+  project_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  user_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  issue_count=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM issues;" 2>/dev/null | tr -d "[:space:]" || echo "0"')
+  
+  if [ "${project_count:-0}" -gt 0 ]; then
+    ok "База данных содержит ${project_count} проектов"
   else
-    warn "База данных пуста или недоступна (проекты: ${projects_display})"
+    warn "База данных пуста или недоступна"
   fi
 
-  if stats_value_available "${restore_stats[repositories_with_data]-}"; then
-    log "  - Репозитории с данными: $(stats_format_value "${restore_stats[repositories_with_data]-}")"
-  fi
-
-  local users_line
-  users_line=$(stats_format_value "${restore_stats[users_total]-}")
-  if stats_value_available "${restore_stats[users_active]-}"; then
-    users_line+=" (активные: $(stats_format_value "${restore_stats[users_active]-}"))"
-  fi
-  log "  - Пользователи: ${users_line}"
-  log "  - Ишью: $(stats_format_value "${restore_stats[issues_total]-}")"
-  log "  - Merge Requests: $(stats_format_value "${restore_stats[merge_requests_total]-}")"
-  log "  - Размер базы данных: $(stats_format_value "${restore_stats[db_size]-}")"
-
-  if stats_value_available "${restore_stats[storage_total]-}"; then
-    log "  - Хранилища проектов: $(stats_format_value "${restore_stats[storage_total]-}")"
-    local storage_indent="      "
-    if stats_value_available "${restore_stats[repos_size]-}"; then
-      log "${storage_indent}· Репозитории: $(stats_format_value "${restore_stats[repos_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[wiki_size]-}"; then
-      log "${storage_indent}· Вики: $(stats_format_value "${restore_stats[wiki_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[lfs_size]-}"; then
-      log "${storage_indent}· LFS: $(stats_format_value "${restore_stats[lfs_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[artifacts_size]-}"; then
-      log "${storage_indent}· Артефакты: $(stats_format_value "${restore_stats[artifacts_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[packages_size]-}"; then
-      log "${storage_indent}· Пакеты: $(stats_format_value "${restore_stats[packages_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[uploads_size]-}"; then
-      log "${storage_indent}· Загрузки: $(stats_format_value "${restore_stats[uploads_size]-}")"
-    fi
-    if stats_value_available "${restore_stats[snippets_size]-}"; then
-      log "${storage_indent}· Сниппеты: $(stats_format_value "${restore_stats[snippets_size]-}")"
-    fi
-  fi
+  log "  - Пользователи: $user_count"
+  log "  - Ишью: $issue_count"
 
   log "[>] Проверка веб‑интерфейса…"
   local http_status
@@ -450,7 +408,7 @@ verify_restore_success() {
   log "[>] Проверка фоновых миграций…"
   dexec 'gitlab-rake gitlab:background_migrations:status' || true
 
-  log "[>] Размер восстановленных данных на диске:"
+  log "[>] Размер восстановленных данных:"
   dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'
   dexec 'du -sh /var/opt/gitlab/postgresql/data | awk '\''{print "  - База данных: "$1}'\'' || true'
 
@@ -514,183 +472,6 @@ ensure_initial_snapshot() {
   return 0
 }
 
-read_backup_metadata() {
-  local archive="$1" tmp
-  tmp="$(mktemp)" || return 1
-
-  if [[ "$archive" == *.tar.gz || "$archive" == *.tgz ]]; then
-    tar -xOzf "$archive" backup_information.yml >"$tmp" 2>/dev/null || {
-      rm -f "$tmp" 2>/dev/null || true
-      return 1
-    }
-  else
-    tar -xOf "$archive" backup_information.yml >"$tmp" 2>/dev/null || {
-      rm -f "$tmp" 2>/dev/null || true
-      return 1
-    }
-  fi
-
-  local gitlab_version db_version created_at backup_id
-  gitlab_version=$(sed -n 's/^:gitlab_version:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
-  db_version=$(sed -n 's/^:db_version:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
-  created_at=$(sed -n 's/^:backup_created_at:[[:space:]]*//p' "$tmp" | head -n1 || true)
-  if [ -z "${created_at// }" ]; then
-    created_at=$(sed -n 's/^:created_at:[[:space:]]*//p' "$tmp" | head -n1 || true)
-  fi
-  backup_id=$(sed -n 's/^:backup_id:[[:space:]]*//p' "$tmp" | head -n1 | tr -d '"' | tr -d "'" || true)
-
-  rm -f "$tmp" 2>/dev/null || true
-
-  [ -n "${gitlab_version// }" ] && printf 'gitlab_version=%s\n' "$gitlab_version"
-  [ -n "${db_version// }" ] && printf 'db_version=%s\n' "$db_version"
-  [ -n "${created_at// }" ] && printf 'created_at=%s\n' "${created_at%%[$'\r\n']*}"
-  [ -n "${backup_id// }" ] && printf 'backup_id=%s\n' "$backup_id"
-  return 0
-}
-
-show_backup_overview() {
-  local archive="$1" prefix="${2:-  - }" label="${3:-Архив бэкапа}" sub_prefix="${4:-    • }"
-  [ -f "$archive" ] || { warn "Архив бэкапа не найден: $archive"; return; }
-
-  BACKUP_OVERVIEW_GITLAB=""
-  BACKUP_OVERVIEW_DB_VERSION=""
-  BACKUP_OVERVIEW_CREATED_AT=""
-  BACKUP_OVERVIEW_ID=""
-
-  local size base
-  size=$(du -h "$archive" 2>/dev/null | awk '{print $1}' || true)
-  base="$(basename "$archive")"
-  log "${prefix}${label}: ${base}"
-  log "${sub_prefix}Полный путь: $archive"
-  log "${sub_prefix}Размер: ${size:-unknown}"
-
-  local meta="" gitlab_version="" db_version="" created_at="" backup_id="" meta_ok=0
-  if meta=$(read_backup_metadata "$archive" 2>/dev/null); then
-    meta_ok=1
-    while IFS='=' read -r key value; do
-      case "$key" in
-        gitlab_version) gitlab_version="$value" ;;
-        db_version) db_version="$value" ;;
-        created_at) created_at="$value" ;;
-        backup_id) backup_id="$value" ;;
-      esac
-    done <<<"$meta"
-  fi
-
-  BACKUP_OVERVIEW_GITLAB="$gitlab_version"
-  BACKUP_OVERVIEW_DB_VERSION="$db_version"
-  BACKUP_OVERVIEW_CREATED_AT="$created_at"
-  BACKUP_OVERVIEW_ID="$backup_id"
-
-  if [ -n "$gitlab_version" ]; then
-    log "${sub_prefix}GitLab: $gitlab_version"
-  else
-    log "${sub_prefix}GitLab: неизвестно"
-    if [ "$meta_ok" -eq 0 ]; then
-      warn "Не удалось прочитать backup_information.yml из ${archive}"
-    else
-      warn "В backup_information.yml отсутствует ключ :gitlab_version"
-    fi
-  fi
-
-  if [ -n "$db_version" ]; then
-    log "${sub_prefix}Версия схемы БД: $db_version"
-  elif [ "$meta_ok" -eq 1 ]; then
-    log "${sub_prefix}Версия схемы БД: неизвестно"
-  fi
-
-  [ -n "$created_at" ] && log "${sub_prefix}Дата создания: $created_at"
-  [ -n "$backup_id" ] && log "${sub_prefix}Backup ID: $backup_id"
-}
-
-show_snapshot_overview() {
-  local snap="$1" snap_state="$2"
-  local snap_ts snap_ver snap_image
-
-  snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"
-  snap_ver="$(get_state_from_file "$snap_state" SNAPSHOT_VERSION || true)"
-  snap_image="$(get_state_from_file "$snap_state" SNAPSHOT_IMAGE || true)"
-
-  [ -n "$snap_ts" ] && log "  - Метка снапшота: $snap_ts"
-  [ -n "$snap_ver" ] && log "  - Версия GitLab (state): $snap_ver"
-  [ -n "$snap_image" ] && log "  - Образ контейнера: $snap_image"
-
-  local backup_file
-  backup_file=$(ls -1t "$snap/data/backups"/*_gitlab_backup.tar* 2>/dev/null | head -n1 || true)
-  if [ -n "$backup_file" ]; then
-    show_backup_overview "$backup_file" "  - " "Локальный архив бэкапа" "    • "
-    if [ -z "$snap_ver" ] && [ -n "$BACKUP_OVERVIEW_GITLAB" ]; then
-      log "  - Версия GitLab (по архиву): $BACKUP_OVERVIEW_GITLAB"
-    fi
-    if [ -n "$snap_ver" ] && [ -n "$BACKUP_OVERVIEW_GITLAB" ] && [ "$snap_ver" != "$BACKUP_OVERVIEW_GITLAB" ]; then
-      warn "Версия GitLab в state (${snap_ver}) отличается от backup_information.yml (${BACKUP_OVERVIEW_GITLAB})"
-    fi
-  fi
-
-  local repo_dir db_dir repo_size db_size repo_count wiki_count design_count size_line
-  repo_dir="$snap/data/git-data/repositories"
-  db_dir="$snap/data/postgresql/data"
-
-  repo_size=""
-  db_size=""
-
-  if [ -d "$repo_dir" ]; then
-    if size_line=$(du -sh "$repo_dir" 2>/dev/null); then
-      repo_size="${size_line%%$'\t'*}"
-    else
-      warn "Не удалось определить размер репозиториев в $repo_dir"
-    fi
-  fi
-
-  if [ -d "$db_dir" ]; then
-    if size_line=$(du -sh "$db_dir" 2>/dev/null); then
-      db_size="${size_line%%$'\t'*}"
-    else
-      warn "Не удалось определить размер базы данных в $db_dir"
-    fi
-  fi
-
-  if [ -n "$repo_size" ] || [ -n "$db_size" ]; then
-    log "  - Размеры данных:"
-    [ -n "$repo_size" ] && log "      • Репозитории: $repo_size"
-    [ -n "$db_size" ] && log "      • PostgreSQL: $db_size"
-  fi
-
-  if [ -d "$repo_dir" ]; then
-    local counts_ok=1
-    if repo_count=$(find "$repo_dir" -type d -name '*.git' ! -name '*.wiki.git' ! -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
-      :
-    else
-      counts_ok=0
-      repo_count="unknown"
-    fi
-
-    if wiki_count=$(find "$repo_dir" -type d -name '*.wiki.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
-      :
-    else
-      counts_ok=0
-      wiki_count="unknown"
-    fi
-
-    if design_count=$(find "$repo_dir" -type d -name '*.design.git' -print 2>/dev/null | wc -l | awk '{print $1}'); then
-      :
-    else
-      counts_ok=0
-      design_count="unknown"
-    fi
-
-    log "  - Репозитории (по директориям *.git):"
-    log "      • Основные: ${repo_count:-0}"
-    log "      • Wiki: ${wiki_count:-0}"
-    log "      • Design: ${design_count:-0}"
-
-    if [ $counts_ok -eq 0 ]; then
-      warn "Не удалось корректно подсчитать количество репозиториев (возможно, отсутствуют права доступа)"
-    fi
-  fi
-
-}
-
 restore_from_local_snapshot() {
   local snap="$BASE_SNAPSHOT_DIR" snap_state="$BASE_SNAPSHOT_DIR/state.env" snap_ver
   snap_ver="$(get_state_from_file "$snap_state" SNAPSHOT_VERSION || true)"
@@ -699,12 +480,11 @@ restore_from_local_snapshot() {
       ok "Локальный бэкап уже создан и актуален — пропускаю восстановление"
       return
     fi
-    if [ "${SNAPSHOT_INFO_ALREADY_SHOWN:-0}" -eq 0 ]; then
-      log "[>] Найден локальный бэкап ${snap}"
-      show_snapshot_overview "$snap" "$snap_state"
-      SNAPSHOT_INFO_ALREADY_SHOWN=1
+    local prompt="Найден локальный бэкап ${snap}"
+    if [ -n "$snap_ver" ]; then
+      prompt+=" (версия GitLab ${snap_ver})"
     fi
-    local prompt="Восстановить локальный бэкап?"
+    prompt+=". Восстановить его?"
     if ask_yes_no "$prompt" "y"; then
       stop_container
       log "[>] Восстанавливаю каталоги из ${snap}"

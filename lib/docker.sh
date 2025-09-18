@@ -11,20 +11,6 @@ docker_ok() {
   fi
 }
 
-ensure_docker_available() {
-  if ! command -v docker >/dev/null 2>&1; then
-    err "Команда 'docker' недоступна. Установите Docker или выполните скрипт на хосте с Docker."
-    return 1
-  fi
-
-  if ! docker_ok; then
-    err "Docker daemon недоступен. Убедитесь, что служба Docker запущена и повторите попытку."
-    return 1
-  fi
-
-  return 0
-}
-
 # Use non-login shell to avoid TTY errors
 dexec() {
   local cmd="$1" out rc

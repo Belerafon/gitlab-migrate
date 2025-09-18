@@ -406,7 +406,13 @@ verify_restore_success() {
   fi
 
   log "[>] Проверка фоновых миграций…"
-  dexec 'gitlab-rake gitlab:background_migrations:status' || true
+  if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
+    if ! dexec 'gitlab-rake gitlab:background_migrations:status'; then
+      warn "Задача gitlab:background_migrations:status завершилась с ошибкой"
+    fi
+  else
+    log "  - Задача gitlab:background_migrations:status недоступна в этой версии GitLab"
+  fi
 
   log "[>] Размер восстановленных данных:"
   dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'
@@ -427,7 +433,7 @@ current_image_tag() {
 }
 
 create_snapshot() {
-  local current_version="$1" image_tag snapshot_ts
+  local current_version="${1-}" image_tag snapshot_ts
   current_version="${current_version:-$(current_gitlab_version)}"
   current_version="${current_version:-unknown}"
   image_tag="$(current_image_tag)"; image_tag="${image_tag:-unknown}"

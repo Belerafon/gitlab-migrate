@@ -25,6 +25,8 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0
+INITIAL_ACTION=""
+SNAPSHOT_INFO_ALREADY_SHOWN=0
 
 . "$BASEDIR/lib/runtime.sh"
 
@@ -47,6 +49,26 @@ main() {
 
   need_root; need_cmd docker; docker_ok || { err "Docker daemon недоступен"; exit 1; }
   state_init
+
+  prompt_initial_action
+
+  case "$INITIAL_ACTION" in
+    exit)
+      ok "Завершение по запросу пользователя"
+      return 0 ;;
+    snapshot)
+      if snapshot_only_mode; then
+        return 0
+      else
+        err "Не удалось создать локальный снапшот"
+        return 1
+      fi ;;
+    continue|'')
+      : ;; # продолжаем обычный сценарий
+    *)
+      err "Неизвестное действие: ${INITIAL_ACTION}"
+      return 1 ;;
+  esac
 
   ensure_dirs
   restore_from_local_snapshot

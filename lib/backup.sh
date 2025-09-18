@@ -660,8 +660,11 @@ restore_from_local_snapshot() {
       ok "Локальный бэкап уже создан и актуален — пропускаю восстановление"
       return
     fi
-    log "[>] Найден локальный бэкап ${snap}"
-    show_snapshot_overview "$snap" "$snap_state"
+    if [ "${SNAPSHOT_INFO_ALREADY_SHOWN:-0}" -eq 0 ]; then
+      log "[>] Найден локальный бэкап ${snap}"
+      show_snapshot_overview "$snap" "$snap_state"
+      SNAPSHOT_INFO_ALREADY_SHOWN=1
+    fi
     local prompt="Восстановить локальный бэкап?"
     if ask_yes_no "$prompt" "y"; then
       stop_container

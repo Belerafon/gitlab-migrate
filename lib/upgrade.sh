@@ -290,3 +290,29 @@ upgrade_to_series() {
     log "[>] Пауза ${WAIT_BETWEEN_STEPS}s"; sleep "$WAIT_BETWEEN_STEPS"
     set_state LAST_UPGRADED_TO "$target"
 }
+
+pause_after_upgrade_step() {
+  local target="$1" context
+
+  if [ -z "$target" ]; then
+    target="$(get_state LAST_UPGRADED_TO || true)"
+  fi
+
+  if [ -n "$target" ]; then
+    context="после апгрейда до ${target}"
+    log "[>] Шаг обновления до ${target} завершён — приостанавливаюсь"
+  else
+    context="после апгрейда"
+    log "[>] Шаг обновления завершён — приостанавливаюсь"
+  fi
+
+  report_basic_health "перед остановкой ${context}"
+
+  if [ -n "$target" ]; then
+    ok "Шаг апгрейда до ${target} завершён. Запустите скрипт ещё раз для продолжения."
+  else
+    ok "Шаг апгрейда завершён. Запустите скрипт ещё раз для продолжения."
+  fi
+
+  exit 0
+}

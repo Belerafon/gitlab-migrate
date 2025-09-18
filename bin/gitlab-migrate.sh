@@ -23,6 +23,15 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/gitlab-migrate-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+SCRIPT_REVISION="unknown"
+if command -v git >/dev/null 2>&1; then
+  if git -C "$BASEDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SCRIPT_REVISION="$(git -C "$BASEDIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+  fi
+fi
+
+log "[>] gitlab-migrate: запуск скрипта (rev=${SCRIPT_REVISION})"
+
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0
 INITIAL_ACTION=""

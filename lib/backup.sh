@@ -76,6 +76,7 @@ import_backup_and_config() {
     err "В gitlab_config.tar нет gitlab.rb или gitlab-secrets.json"
     exit 1
   fi
+  permissions_mark_pending
   ok "Импортированы backup и конфиг"
   set_state IMPORT_DONE 1
 }
@@ -499,6 +500,7 @@ restore_from_local_snapshot() {
       cp -a "$snap"/{config,data,logs} "$DATA_ROOT/"
       cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
       set_state BASE_STARTED 0
+      permissions_mark_pending
       local snap_ts snap_image
       snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"
       snap_image="$(get_state_from_file "$snap_state" SNAPSHOT_IMAGE || true)"

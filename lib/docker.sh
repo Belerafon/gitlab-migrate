@@ -42,6 +42,36 @@ container_restart_count() {
   docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null | grep -v "mesg: ttyname failed" || echo 0
 }
 
+permissions_mark_pending() {
+  set_state PERMISSIONS_PENDING 1
+}
+
+permissions_clear_pending() {
+  set_state PERMISSIONS_PENDING 0
+}
+
+permissions_is_pending() {
+  [ "$(get_state PERMISSIONS_PENDING || true)" = "1" ]
+}
+
+run_update_permissions_image() {
+  local image_ref="$1"
+  if [ -z "$image_ref" ]; then
+    warn "Не указан образ для update-permissions"
+    return 1
+  fi
+
+  if [[ "$image_ref" != */* ]]; then
+    image_ref="gitlab/gitlab-ce:${image_ref}"
+  fi
+
+  docker run --rm \
+    -v "$DATA_ROOT/config:/etc/gitlab" \
+    -v "$DATA_ROOT/data:/var/opt/gitlab" \
+    -v "$DATA_ROOT/logs:/var/log/gitlab" \
+    "$image_ref" update-permissions >/dev/null 2>&1
+}
+
 # Останавливает и удаляет контейнер, если он существует
 stop_container() {
   if docker ps -a --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
@@ -91,12 +121,12 @@ run_container() {
   # напрямую с хоста сложно: придётся тащить весь необходимый стек. Поэтому мы
   # запускаем короткоживущий контейнер, который выполняет update-permissions в
   # «родной» среде перед стартом основного инстанса.
-  docker run --rm \
-    -v "$DATA_ROOT/config:/etc/gitlab" \
-    -v "$DATA_ROOT/data:/var/opt/gitlab" \
-    -v "$DATA_ROOT/logs:/var/log/gitlab" \
-    gitlab/gitlab-ce:"$image" update-permissions >/dev/null 2>&1 \
-    || warn "update-permissions завершился с ошибкой"
+  if run_update_permissions_image "$image"; then
+    permissions_clear_pending
+  else
+    warn "update-permissions завершился с ошибкой"
+    permissions_mark_pending
+  fi
   # Отключаем авто-миграции до восстановления
   touch "$DATA_ROOT/data/skip-auto-migrations" 2>/dev/null || true
   docker run -d --name "$CONTAINER_NAME" --restart=always \
@@ -208,9 +238,40 @@ report_basic_health() {
 }
 
 ensure_permissions() {
+  if ! permissions_is_pending; then
+    log "[>] Выравнивание прав не требуется — пропускаю"
+    return
+  fi
+
+  local image running=0
+  image=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
+  if [ -z "$image" ]; then
+    warn "Не удалось определить образ контейнера для update-permissions"
+    return
+  fi
+
   if container_running; then
-    log "[>] Выравниваю права (update-permissions)…"
-    dexec 'update-permissions >/dev/null 2>&1' || warn "update-permissions завершился с ошибкой"
+    running=1
+    log "[>] Останавливаю контейнер перед выравниванием прав…"
+    if ! docker stop "$CONTAINER_NAME" >/dev/null 2>&1; then
+      warn "Не удалось остановить контейнер $CONTAINER_NAME"
+    fi
+    sleep 5
+  fi
+
+  log "[>] Выравниваю права (update-permissions)…"
+  if run_update_permissions_image "$image"; then
+    permissions_clear_pending
+  else
+    warn "update-permissions завершился с ошибкой"
+  fi
+
+  if [ $running -eq 1 ]; then
+    log "[>] Запускаю контейнер после выравнивания прав…"
+    if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1; then
+      warn "Не удалось запустить контейнер $CONTAINER_NAME"
+    fi
+    sleep "$WAIT_AFTER_START"
   fi
 }
 

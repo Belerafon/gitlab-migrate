@@ -241,7 +241,8 @@ upgrade_to_series() {
     wait_gitlab_ready
     wait_postgres_ready
     wait_upgrade_completion
-  
+    report_basic_health "после апгрейда до ${target}"
+
     log "[>] Проверка миграций схемы:"
     local ms_output up_count down_count
     ms_output=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null || true)

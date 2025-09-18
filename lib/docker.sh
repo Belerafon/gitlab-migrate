@@ -117,6 +117,96 @@ show_versions() {
   dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo "unknown"' >&2 || true
 }
 
+probe_gitlab_http() {
+  local endpoints=(
+    "http://127.0.0.1:8080/-/readiness|readiness (workhorse:8080)"
+    "http://127.0.0.1/-/readiness|readiness (nginx:80)"
+    "https://127.0.0.1/-/readiness|readiness (nginx:443, self-signed)"
+    "http://127.0.0.1:8080/users/sign_in|страница входа (workhorse:8080)"
+    "https://127.0.0.1/users/sign_in|страница входа (nginx:443, self-signed)"
+  )
+  local attempts=()
+  local entry url desc opts command output quoted_url
+
+  for entry in "${endpoints[@]}"; do
+    IFS='|' read -r url desc <<<"$entry"
+    opts='-sS'
+    [[ "$url" == https://* ]] && opts='-ksS'
+    printf -v quoted_url '%q' "$url"
+    command="if command -v curl >/dev/null 2>&1; then curl ${opts} --max-time 10 --connect-timeout 5 -o /dev/null -w '%{http_code}' ${quoted_url}; else echo NO_CURL; fi"
+    if ! output=$(dexec "$command" 2>/dev/null); then
+      :
+    fi
+    output="${output//$'\r'/}"
+    attempts+=("${desc}: ${output:-n/a}")
+    if [ "$output" = "NO_CURL" ]; then
+      printf '%s' "curl недоступен в контейнере"
+      return
+    fi
+    if [[ "$output" =~ ^[0-9]{3}$ ]] && [ "$output" != "000" ]; then
+      printf 'HTTP %s (%s)' "$output" "$desc"
+      return
+    fi
+  done
+
+  local summary
+  summary=$(IFS='; '; echo "${attempts[*]}")
+  printf 'HTTP недоступен (%s)' "$summary"
+}
+
+report_basic_health() {
+  local context="$1" mode="$2" check_db=1
+  [ "$mode" = "skip-db" ] && check_db=0
+
+  if [ -n "$context" ]; then
+    log "[>] Базовая проверка состояния GitLab (${context}):"
+  else
+    log "[>] Базовая проверка состояния GitLab:"
+  fi
+
+  if ! container_running; then
+    warn "    - Контейнер ${CONTAINER_NAME} не запущен"
+    return
+  fi
+
+  local container_state restart_count
+  container_state=$(docker inspect -f 'status={{.State.Status}}, pid={{.State.Pid}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+  restart_count=$(container_restart_count)
+  log "    - Контейнер: ${container_state}; перезапусков: ${restart_count}"
+
+  local http_info
+  http_info=$(probe_gitlab_http || printf 'проверка не выполнена')
+  log "    - HTTP проверка: ${http_info}"
+
+  local ctl_output ctl_rc=0
+  if ctl_output=$(dexec 'gitlab-ctl status' 2>&1); then
+    ctl_rc=0
+  else
+    ctl_rc=$?
+  fi
+  if [ -n "$ctl_output" ]; then
+    if [ "$ctl_rc" -eq 0 ]; then
+      log "    - Службы (gitlab-ctl status):"
+    else
+      warn "    - gitlab-ctl status завершился с кодом ${ctl_rc}"
+      log "      вывод команды:"
+    fi
+    printf '%s\n' "$ctl_output" | sed 's/^/      /'
+  else
+    warn "    - gitlab-ctl status не вернул данных"
+  fi
+
+  if [ "$check_db" -eq 1 ]; then
+    if dexec 'gitlab-psql -d gitlabhq_production -c "SELECT 1;" >/dev/null 2>&1'; then
+      log "    - PostgreSQL: SELECT 1 выполняется"
+    else
+      warn "    - PostgreSQL: нет ответа на SELECT 1"
+    fi
+  else
+    log "    - PostgreSQL: проверка пропущена (ожидаем готовность)"
+  fi
+}
+
 ensure_permissions() {
   if container_running; then
     log "[>] Выравниваю права (update-permissions)…"
@@ -127,19 +217,30 @@ ensure_permissions() {
 wait_gitlab_ready() {
   local timeout=${READY_TIMEOUT:-900}
   local progress=${READY_STATUS_INTERVAL:-30}
-  log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${timeout}s)…"
   local waited=0
   local last_report=0
   local fmt_total="∞"
+  local success=0
+
+  log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${timeout}s)…"
+
   if [ "$timeout" -gt 0 ]; then
     fmt_total=$(printf "%02d:%02d" $((timeout / 60)) $((timeout % 60)))
   fi
-  until dexec 'gitlab-ctl status >/dev/null 2>&1'; do
-    sleep 3; waited=$((waited+3))
-    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
-      warn "gitlab-ctl status не ответил за ${timeout}s — продолжу"
-      return 0
+
+  while true; do
+    if dexec 'gitlab-ctl status >/dev/null 2>&1'; then
+      success=1
+      break
     fi
+
+    sleep 3
+    waited=$((waited+3))
+
+    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+      break
+    fi
+
     if [ "$progress" -gt 0 ] && [ $((waited - last_report)) -ge "$progress" ]; then
       local fmt_waited
       fmt_waited=$(printf "%02d:%02d" $((waited / 60)) $((waited % 60)))
@@ -151,7 +252,16 @@ wait_gitlab_ready() {
       last_report=$waited
     fi
   done
-  ok "gitlab-ctl status OK"
+
+  if [ $success -eq 1 ]; then
+    ok "gitlab-ctl status OK"
+  elif [ "$timeout" -gt 0 ]; then
+    warn "gitlab-ctl status не ответил за ${timeout}s — продолжу"
+  else
+    warn "gitlab-ctl status пока недоступен"
+  fi
+
+  report_basic_health "после ожидания gitlab-ctl status" "skip-db"
 }
 
 wait_postgres_ready() {
@@ -179,6 +289,7 @@ wait_postgres_ready() {
     fi
   done
   ok "PostgreSQL готов"
+  report_basic_health "после ожидания PostgreSQL"
 }
 
 wait_container_health() {

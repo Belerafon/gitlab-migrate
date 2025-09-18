@@ -15,6 +15,38 @@ latest_patch_tag() {
   esac
 }
 
+# Убирает суффиксы вроде «-ce.0» и переводит версию в компактный вид.
+normalize_version_string() {
+  local version="$1"
+  version="${version%%-*}"
+  version="${version//$'\r'/}"
+  version="${version//$'\n'/}"
+  version="${version//[$' \t']/}"
+  printf '%s' "$version"
+}
+
+# Проверяет, что первая версия не меньше второй (сравнение major.minor.patch).
+version_ge() {
+  local left right highest
+
+  left="$(normalize_version_string "$1")"
+  right="$(normalize_version_string "$2")"
+
+  if [ -z "$left" ]; then
+    return 1
+  fi
+  if [ -z "$right" ]; then
+    return 0
+  fi
+
+  if [ "$left" = "$right" ]; then
+    return 0
+  fi
+
+  highest=$(printf '%s\n%s\n' "$left" "$right" | LC_ALL=C sort -V | tail -n1)
+  [[ "$highest" = "$left" ]]
+}
+
 compute_stops() {
   echo "13.12"
   echo "14.0"

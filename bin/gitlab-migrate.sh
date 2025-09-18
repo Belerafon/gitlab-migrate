@@ -96,17 +96,15 @@ main() {
   mapfile -t stops < <(compute_stops)
   echo "  → ${stops[*]} (будут разрешены до latest patch)" >&2
 
-  local cur_ver s sM sm cM cm
+  local cur_ver_raw cur_ver target_tag target_version s
   for s in "${stops[@]}"; do
-    cur_ver="$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo 0.0.0')"
-    if [[ "$s" =~ ^[0-9]+\.[0-9]+$ ]]; then
-      sM="${s%%.*}"; sm="${s##*.}"
-      cM="${cur_ver%%.*}"; cm="$(echo "$cur_ver" | cut -d. -f2)"
-      if { [ "$cM" -gt "$sM" ] || { [ "$cM" -eq "$sM" ] && [ "$cm" -gt "$sm" ]; }; }; then
-        ok "Текущая $cur_ver >= ${s}.x — пропускаю"; continue
-      fi
-    elif [ "$s" = "17" ]; then
-      cM="${cur_ver%%.*}"; [ "$cM" -ge 17 ] && { ok "Текущая $cur_ver >= 17.x — пропускаю"; continue; }
+    cur_ver_raw="$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo 0.0.0')"
+    cur_ver="$(normalize_version_string "$cur_ver_raw")"
+    target_tag="$(latest_patch_tag "$s")"
+    target_version="$(normalize_version_string "$target_tag")"
+
+    if version_ge "$cur_ver" "$target_version"; then
+      ok "Текущая ${cur_ver:-unknown} >= ${target_version} — пропускаю"; continue
     fi
     upgrade_to_series "$s"
     pause_after_upgrade_step "$(get_state LAST_UPGRADED_TO || true)"

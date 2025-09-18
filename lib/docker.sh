@@ -155,7 +155,7 @@ probe_gitlab_http() {
 }
 
 report_basic_health() {
-  local context="$1" mode="$2" check_db=1
+  local context="${1-}" mode="${2-}" check_db=1
   [ "$mode" = "skip-db" ] && check_db=0
 
   if [ -n "$context" ]; then

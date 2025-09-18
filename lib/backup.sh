@@ -564,7 +564,7 @@ show_backup_overview() {
   log "${sub_prefix}Полный путь: $archive"
   log "${sub_prefix}Размер: ${size:-unknown}"
 
-  local meta gitlab_version db_version created_at backup_id meta_ok=0
+  local meta="" gitlab_version="" db_version="" created_at="" backup_id="" meta_ok=0
   if meta=$(read_backup_metadata "$archive" 2>/dev/null); then
     meta_ok=1
     while IFS='=' read -r key value; do

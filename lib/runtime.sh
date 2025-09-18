@@ -45,18 +45,69 @@ prompt_initial_action() {
     log "  3) Выйти"
   fi
 
+  local prompt_fd=0
+  local prompt_source="stdin"
+  if [ -t 0 ]; then
+    log "[debug] prompt_initial_action: stdin является TTY — читаем с fd0"
+  else
+    log "[debug] prompt_initial_action: stdin не является TTY"
+    if [ -r /dev/tty ]; then
+      if exec {prompt_fd}<>/dev/tty; then
+        prompt_source="/dev/tty"
+        log "[debug] prompt_initial_action: удалось открыть /dev/tty (fd ${prompt_fd})"
+      else
+        log "[debug] prompt_initial_action: не удалось открыть /dev/tty для чтения"
+        prompt_fd=0
+      fi
+    else
+      log "[debug] prompt_initial_action: устройство /dev/tty недоступно для чтения"
+    fi
+  fi
+
   while true; do
-    read -r -p "Выбор [1-3]: " choice || choice=""
-    choice="${choice:-1}"
+    local read_status=0
+    local raw_choice=""
+    if [ "$prompt_fd" -eq 0 ]; then
+      if ! read -r -p "Выбор [1-3]: " raw_choice; then
+        read_status=$?
+      fi
+    else
+      printf "Выбор [1-3]: " >&"$prompt_fd"
+      if ! IFS= read -r -u "$prompt_fd" raw_choice; then
+        read_status=$?
+      fi
+    fi
+
+    log "[debug] prompt_initial_action: read завершился со статусом ${read_status} (источник: ${prompt_source}), сырое значение='${raw_choice}'"
+
+    choice="${raw_choice:-1}"
+    if [ "$read_status" -ne 0 ]; then
+      if [ "$prompt_fd" -eq 0 ] && [ "$prompt_source" = "stdin" ] && [ -r /dev/tty ]; then
+        log "[debug] prompt_initial_action: повторная попытка чтения через /dev/tty"
+        if exec {prompt_fd}<>/dev/tty; then
+          prompt_source="/dev/tty"
+          continue
+        else
+          log "[debug] prompt_initial_action: не удалось открыть /dev/tty при повторной попытке"
+        fi
+      fi
+      log "[debug] prompt_initial_action: используем значение по умолчанию '${choice}' из-за статуса чтения ${read_status}"
+    fi
+
     case "$choice" in
-      1) INITIAL_ACTION="continue"; return 0 ;;
-      2) INITIAL_ACTION="snapshot";  return 0 ;;
-      3) INITIAL_ACTION="exit";      return 0 ;;
+      1) INITIAL_ACTION="continue"; break ;;
+      2) INITIAL_ACTION="snapshot";  break ;;
+      3) INITIAL_ACTION="exit";      break ;;
       *) log "Введите 1, 2 или 3." ;;
     esac
   done
-}
 
+  if [ "$prompt_fd" -ne 0 ]; then
+    exec {prompt_fd}>&-
+  fi
+
+  return 0
+}
 snapshot_only_mode() {
   local missing=()
   for d in config data logs; do

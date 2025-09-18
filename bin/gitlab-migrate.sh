@@ -47,7 +47,7 @@ main() {
     esac
   done
 
-  need_root; need_cmd docker; docker_ok || { err "Docker daemon недоступен"; exit 1; }
+  need_root
   state_init
 
   prompt_initial_action
@@ -57,6 +57,11 @@ main() {
       ok "Завершение по запросу пользователя"
       return 0 ;;
     snapshot)
+      if ! ensure_docker_available; then
+        # Завершаем без ERR trap, чтобы не дергать Docker диагностикой до явного запуска
+        trap - ERR
+        exit 1
+      fi
       if snapshot_only_mode; then
         return 0
       else
@@ -69,6 +74,12 @@ main() {
       err "Неизвестное действие: ${INITIAL_ACTION}"
       return 1 ;;
   esac
+
+  if ! ensure_docker_available; then
+    # Завершаем без ERR trap, чтобы не дергать Docker диагностикой до явного запуска
+    trap - ERR
+    exit 1
+  fi
 
   ensure_dirs
   restore_from_local_snapshot

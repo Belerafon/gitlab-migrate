@@ -24,6 +24,62 @@ compute_stops() {
   [ "$DO_TARGET_17" = "yes" ] && echo "17"
 }
 
+format_bytes_human() {
+  local bytes="$1" human=""
+  if [[ "$bytes" =~ ^[0-9]+$ ]]; then
+    if command -v numfmt >/dev/null 2>&1; then
+      human=$(numfmt --to=iec --suffix=B "$bytes" 2>/dev/null || true)
+    fi
+    if [ -n "$human" ]; then
+      printf "%s (%s B)" "$human" "$bytes"
+      return
+    fi
+    printf "%s B" "$bytes"
+  else
+    printf "%s" "$bytes"
+  fi
+}
+
+log_gitlab_instance_stats() {
+  if ! container_running; then
+    warn "Контейнер ${CONTAINER_NAME} не запущен — пропускаю сбор статистики"
+    return
+  fi
+
+  local projects_raw users_raw repo_size_raw projects users repo_size display
+
+  projects="unknown"
+  if projects_raw=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM projects;"' 2>/dev/null); then
+    projects=$(printf "%s" "$projects_raw" | tr -d '[:space:]')
+    [ -n "$projects" ] || projects="0"
+  else
+    warn "Не удалось получить количество репозиториев"
+  fi
+
+  users="unknown"
+  if users_raw=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COUNT(*) FROM users;"' 2>/dev/null); then
+    users=$(printf "%s" "$users_raw" | tr -d '[:space:]')
+    [ -n "$users" ] || users="0"
+  else
+    warn "Не удалось получить количество пользователей"
+  fi
+
+  repo_size="unknown"
+  if repo_size_raw=$(dexec 'gitlab-psql -d gitlabhq_production -t -c "SELECT COALESCE(SUM(repository_size),0) FROM project_statistics;"' 2>/dev/null); then
+    repo_size=$(printf "%s" "$repo_size_raw" | tr -d '[:space:]')
+    [ -n "$repo_size" ] || repo_size="0"
+  else
+    warn "Не удалось получить суммарный размер репозиториев"
+  fi
+
+  display=$(format_bytes_human "$repo_size")
+
+  log "  статистика GitLab:"
+  log "    - Количество репозиториев (projects): ${projects}"
+  log "    - Количество пользователей: ${users}"
+  log "    - Объём данных репозиториев: ${display}"
+}
+
 prompt_snapshot_after_upgrade() {
   local current_version="$1" target_tag="$2"
   local snapshot_version snapshot_display prompt snapshot_ts snapshot_image
@@ -198,7 +254,9 @@ upgrade_to_series() {
       log "  все миграции применены"
     fi
     log "  итого: up=$up_count, down=$down_count"
-  
+
+    log_gitlab_instance_stats
+
     log "[>] Статус фоновых миграций (если задача есть):"
     if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
       dexec 'gitlab-rake gitlab:background_migrations:status' || warn "Задача gitlab:background_migrations:status завершилась с ошибкой"

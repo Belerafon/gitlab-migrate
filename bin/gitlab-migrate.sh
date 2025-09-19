@@ -50,9 +50,27 @@ main() {
   restore_from_local_snapshot
   import_backup_and_config
 
-  local base_ver base_tag
+  local base_ver base_tag running_image running_tag
   base_ver="$(get_state BASE_VER)"
   base_tag="$(get_state BASE_IMAGE_TAG || true)"
+
+  if container_running; then
+    running_image="$(current_image_tag)"
+    running_image="${running_image//$'\n'/}"; running_image="${running_image//$'\r'/}"
+    if [ -n "$running_image" ]; then
+      running_tag="${running_image#gitlab/gitlab-ce:}"
+      [ -n "$running_tag" ] || running_tag="$running_image"
+      if [ -z "$base_tag" ]; then
+        base_tag="$running_tag"
+        set_state BASE_IMAGE_TAG "$base_tag"
+        log "[i] Сохраняю текущий образ контейнера в state: gitlab/gitlab-ce:${base_tag}"
+      elif [ "$running_tag" != "$base_tag" ]; then
+        log "[i] Контейнер уже запущен с образом gitlab/gitlab-ce:${running_tag}; обновляю BASE_IMAGE_TAG (было ${base_tag})"
+        base_tag="$running_tag"
+        set_state BASE_IMAGE_TAG "$base_tag"
+      fi
+    fi
+  fi
 
   if [ -z "${base_tag// }" ]; then
     base_tag="$(resolve_and_pull_base_image "$base_ver")"

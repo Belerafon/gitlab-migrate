@@ -501,17 +501,59 @@ restore_from_local_snapshot() {
       cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
       set_state BASE_STARTED 0
       permissions_mark_pending
-      local snap_ts snap_image
+
+      local snap_ts snap_image prev_base_ver prev_base_tag new_base_tag
       snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"
       snap_image="$(get_state_from_file "$snap_state" SNAPSHOT_IMAGE || true)"
-      if [ -n "$snap_ts" ]; then
-        log "  - Метка снапшота: ${snap_ts}"
+
+      local snap_ver_clean snap_image_clean snap_ts_clean
+      snap_ver_clean="${snap_ver//$'\r'/}"; snap_ver_clean="${snap_ver_clean//$'\n'/}"
+      snap_image_clean="${snap_image//$'\r'/}"; snap_image_clean="${snap_image_clean//$'\n'/}"
+      snap_ts_clean="${snap_ts//$'\r'/}"; snap_ts_clean="${snap_ts_clean//$'\n'/}"
+
+      if [ -n "$snap_ver_clean" ] && [ "$snap_ver_clean" != "unknown" ]; then
+        prev_base_ver="$(get_state BASE_VER || true)"
+        if [ "$snap_ver_clean" != "${prev_base_ver:-}" ]; then
+          if [ -n "${prev_base_ver:-}" ]; then
+            log "[i] Обновляю BASE_VER из снапшота: ${prev_base_ver} → ${snap_ver_clean}"
+          else
+            log "[i] Сохраняю BASE_VER из снапшота: ${snap_ver_clean}"
+          fi
+        fi
+        set_state BASE_VER "$snap_ver_clean"
       fi
-      if [ -n "$snap_ver" ]; then
-        log "  - Версия GitLab: ${snap_ver}"
+
+      if [ -n "$snap_image_clean" ] && [ "$snap_image_clean" != "unknown" ]; then
+        new_base_tag=""
+        if [[ "$snap_image_clean" == *@* ]]; then
+          warn "SNAPSHOT_IMAGE='${snap_image_clean}' содержит digest — оставляю BASE_IMAGE_TAG без изменений"
+        elif [[ "$snap_image_clean" == *":"* ]]; then
+          new_base_tag="${snap_image_clean##*:}"
+        else
+          warn "Не удалось извлечь тег из SNAPSHOT_IMAGE='${snap_image_clean}' — оставляю BASE_IMAGE_TAG без изменений"
+        fi
+        new_base_tag="${new_base_tag//[[:space:]]/}"
+        if [ -n "$new_base_tag" ]; then
+          prev_base_tag="$(get_state BASE_IMAGE_TAG || true)"
+          if [ "$new_base_tag" != "${prev_base_tag:-}" ]; then
+            if [ -n "${prev_base_tag:-}" ]; then
+              log "[i] Обновляю BASE_IMAGE_TAG из снапшота: ${prev_base_tag} → ${new_base_tag}"
+            else
+              log "[i] Сохраняю BASE_IMAGE_TAG из снапшота: ${new_base_tag}"
+            fi
+          fi
+          set_state BASE_IMAGE_TAG "$new_base_tag"
+        fi
       fi
-      if [ -n "$snap_image" ]; then
-        log "  - Образ контейнера: ${snap_image}"
+
+      if [ -n "$snap_ts_clean" ]; then
+        log "  - Метка снапшота: ${snap_ts_clean}"
+      fi
+      if [ -n "$snap_ver_clean" ]; then
+        log "  - Версия GitLab: ${snap_ver_clean}"
+      fi
+      if [ -n "$snap_image_clean" ]; then
+        log "  - Образ контейнера: ${snap_image_clean}"
       fi
       log "  - Размер репозиториев: $(du -sh "$DATA_ROOT/data/git-data/repositories" 2>/dev/null | cut -f1)"
       log "  - Размер базы данных: $(du -sh "$DATA_ROOT/data/postgresql/data" 2>/dev/null | cut -f1)"

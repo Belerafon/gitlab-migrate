@@ -248,6 +248,8 @@ restore_backup_if_needed() {
   local rlog="/var/log/gitlab/restore_${ts}.log"
   local restore_attempt=1 max_attempts=3
 
+  set_state RESTORE_CONFIRMED 0
+
   while [ $restore_attempt -le $max_attempts ]; do
     log "[>] Восстановление BACKUP=$ts (подробный лог: ${rlog})…"
     log "[>] Попытка восстановления $restore_attempt/$max_attempts…"
@@ -397,15 +399,6 @@ verify_restore_success() {
   log "  - Пользователи: $user_count"
   log "  - Ишью: $issue_count"
 
-  log "[>] Проверка веб‑интерфейса…"
-  local http_status
-  http_status=$(dexec 'curl -s -o /dev/null -w "%{http_code}" http://localhost/-/health 2>/dev/null || echo "000"')
-  if [ "$http_status" = "200" ]; then
-    ok "Веб‑интерфейс доступен (HTTP 200)"
-  else
-    warn "Веб‑интерфейс недоступен или возвращает код $http_status"
-  fi
-
   log "[>] Проверка фоновых миграций…"
   if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
     if ! dexec 'gitlab-rake gitlab:background_migrations:status'; then
@@ -419,8 +412,20 @@ verify_restore_success() {
   dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'
   dexec 'du -sh /var/opt/gitlab/postgresql/data | awk '\''{print "  - База данных: "$1}'\'' || true'
 
-  ok "Восстановление проверено"
+  log "[>] Контрольная проверка GitLab после восстановления"
+  if ensure_gitlab_health "после восстановления"; then
+    ok "Автоматическая проверка после восстановления пройдена"
+  else
+    warn "Автоматическая проверка после восстановления обнаружила проблемы: ${LAST_HEALTH_ISSUES:-unknown}"
+    print_host_log_hint
+  fi
+
   set_state RESTORE_DONE 1
+  if [ "${LAST_HEALTH_OK:-0}" = "1" ]; then
+    ok "Восстановление проверено"
+  else
+    warn "Восстановление завершено, но требуется ручная проверка"
+  fi
 }
 
 BASE_SNAPSHOT_DIR="${DATA_ROOT}-snapshot"
@@ -501,6 +506,8 @@ restore_from_local_snapshot() {
       cp -a "$snap/state.env" "$STATE_FILE" 2>/dev/null || true
       set_state BASE_STARTED 0
       permissions_mark_pending
+      set_state RESTORE_DONE 0
+      set_state RESTORE_CONFIRMED 0
 
       local snap_ts snap_image prev_base_ver prev_base_tag new_base_tag
       snap_ts="$(get_state_from_file "$snap_state" SNAPSHOT_TS || true)"

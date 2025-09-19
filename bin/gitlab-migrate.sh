@@ -46,6 +46,9 @@ main() {
   need_root; need_cmd docker; docker_ok || { err "Docker daemon недоступен"; exit 1; }
   state_init
 
+  log "[i] Лог выполнения (host): $LOG_FILE"
+  log "[i] Логи GitLab на хосте: $DATA_ROOT/logs"
+
   ensure_dirs
   restore_from_local_snapshot
   import_backup_and_config
@@ -105,6 +108,8 @@ main() {
   else
     ok "Проверка восстановления уже выполнена — пропускаю"
   fi
+
+  manual_checkpoint "после восстановления данных GitLab" "RESTORE_CONFIRMED"
 
   if ensure_initial_snapshot; then
     exit 0

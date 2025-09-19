@@ -1,5 +1,9 @@
 # lib/docker.sh
 # shellcheck shell=bash
+LAST_HEALTH_OK=1
+LAST_HEALTH_ISSUES=""
+LAST_HEALTH_HTTP_INFO=""
+LAST_HEALTH_HOST_HTTP_INFO=""
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
 docker_ok() {
@@ -156,7 +160,7 @@ probe_gitlab_http() {
     "https://127.0.0.1/users/sign_in|страница входа (nginx:443, self-signed)"
   )
   local attempts=()
-  local entry url desc opts command output quoted_url
+  local entry url desc opts command output quoted_url code clean_output
 
   for entry in "${endpoints[@]}"; do
     IFS='|' read -r url desc <<<"$entry"
@@ -164,29 +168,72 @@ probe_gitlab_http() {
     [[ "$url" == https://* ]] && opts='-ksS'
     printf -v quoted_url '%q' "$url"
     command="if command -v curl >/dev/null 2>&1; then curl ${opts} --max-time 10 --connect-timeout 5 -o /dev/null -w '%{http_code}' ${quoted_url}; else echo NO_CURL; fi"
-    if ! output=$(dexec "$command" 2>/dev/null); then
-      :
-    fi
+    output=$(dexec "$command" 2>&1 || true)
     output="${output//$'\r'/}"
-    attempts+=("${desc}: ${output:-n/a}")
-    if [ "$output" = "NO_CURL" ]; then
+    code="${output##*$'\n'}"
+    clean_output="${output//$'\n'/ }"
+    attempts+=("${desc}: ${clean_output:-n/a}")
+    if [ "$clean_output" = "NO_CURL" ]; then
       printf '%s' "curl недоступен в контейнере"
-      return
+      return 1
     fi
-    if [[ "$output" =~ ^[0-9]{3}$ ]] && [ "$output" != "000" ]; then
-      printf 'HTTP %s (%s)' "$output" "$desc"
-      return
+    if [[ "$code" =~ ^[0-9]{3}$ ]] && [ "$code" != "000" ]; then
+      printf 'HTTP %s (%s)' "$code" "$desc"
+      return 0
     fi
   done
 
   local summary
   summary=$(IFS='; '; echo "${attempts[*]}")
   printf 'HTTP недоступен (%s)' "$summary"
+  return 1
+}
+
+probe_gitlab_http_host() {
+  local http_port="${PORT_HTTP:-80}" https_port="${PORT_HTTPS:-443}"
+  local endpoints=(
+    "http://127.0.0.1:${http_port}/-/readiness|host readiness (HTTP:${http_port})"
+    "http://127.0.0.1:${http_port}/users/sign_in|host login (HTTP:${http_port})"
+    "https://127.0.0.1:${https_port}/-/readiness|host readiness (HTTPS:${https_port})"
+    "https://127.0.0.1:${https_port}/users/sign_in|host login (HTTPS:${https_port})"
+  )
+  local attempts=()
+  local entry url desc opts output code clean_output
+
+  if ! command -v curl >/dev/null 2>&1; then
+    printf '%s' "curl недоступен на хосте"
+    return 1
+  fi
+
+  for entry in "${endpoints[@]}"; do
+    IFS='|' read -r url desc <<<"$entry"
+    opts='-sS --max-time 10 --connect-timeout 5 -o /dev/null -w %{http_code}'
+    [[ "$url" == https://* ]] && opts='-ksS --max-time 10 --connect-timeout 5 -o /dev/null -w %{http_code}'
+    output=$(curl ${opts} "$url" 2>&1 || true)
+    output="${output//$'\r'/}"
+    code="${output##*$'\n'}"
+    clean_output="${output//$'\n'/ }"
+    attempts+=("${desc}: ${clean_output:-n/a}")
+    if [[ "$code" =~ ^[0-9]{3}$ ]] && [ "$code" != "000" ]; then
+      printf 'HTTP %s (%s)' "$code" "$desc"
+      return 0
+    fi
+  done
+
+  local summary
+  summary=$(IFS='; '; echo "${attempts[*]}")
+  printf 'HTTP недоступен (%s)' "$summary"
+  return 1
 }
 
 report_basic_health() {
   local context="${1-}" mode="${2-}" check_db=1
   [ "$mode" = "skip-db" ] && check_db=0
+
+  LAST_HEALTH_OK=1
+  LAST_HEALTH_ISSUES=""
+  LAST_HEALTH_HTTP_INFO=""
+  LAST_HEALTH_HOST_HTTP_INFO=""
 
   if [ -n "$context" ]; then
     log "[>] Базовая проверка состояния GitLab (${context}):"
@@ -194,9 +241,16 @@ report_basic_health() {
     log "[>] Базовая проверка состояния GitLab:"
   fi
 
+  local issues=()
+
   if ! container_running; then
     warn "    - Контейнер ${CONTAINER_NAME} не запущен"
-    return
+    issues+=("контейнер не запущен")
+    LAST_HEALTH_OK=0
+    LAST_HEALTH_ISSUES="контейнер не запущен"
+    LAST_HEALTH_HTTP_INFO="контейнер не запущен"
+    LAST_HEALTH_HOST_HTTP_INFO="контейнер не запущен"
+    return 0
   fi
 
   local container_state restart_count
@@ -204,9 +258,28 @@ report_basic_health() {
   restart_count=$(container_restart_count)
   log "    - Контейнер: ${container_state}; перезапусков: ${restart_count}"
 
-  local http_info
-  http_info=$(probe_gitlab_http || printf 'проверка не выполнена')
-  log "    - HTTP проверка: ${http_info}"
+  local http_output http_info="" http_rc host_http_output host_http_info="" host_http_rc
+  if http_output=$(probe_gitlab_http); then
+    http_info="$http_output"
+    log "    - HTTP (из контейнера): ${http_info}"
+    http_rc=0
+  else
+    http_rc=$?
+    http_info="$http_output"
+    warn "    - HTTP (из контейнера): ${http_info:-проверка не выполнена}"
+  fi
+  LAST_HEALTH_HTTP_INFO="${http_info:-проверка не выполнена}"
+
+  if host_http_output=$(probe_gitlab_http_host); then
+    host_http_info="$host_http_output"
+    log "    - HTTP (с хоста): ${host_http_info}"
+    host_http_rc=0
+  else
+    host_http_rc=$?
+    host_http_info="$host_http_output"
+    warn "    - HTTP (с хоста): ${host_http_info:-проверка не выполнена}"
+  fi
+  LAST_HEALTH_HOST_HTTP_INFO="${host_http_info:-проверка не выполнена}"
 
   local ctl_output ctl_rc=0
   if ctl_output=$(dexec 'gitlab-ctl status' 2>&1); then
@@ -219,11 +292,13 @@ report_basic_health() {
       log "    - Службы (gitlab-ctl status):"
     else
       warn "    - gitlab-ctl status завершился с кодом ${ctl_rc}"
+      issues+=("gitlab-ctl status rc=${ctl_rc}")
       log "      вывод команды:"
     fi
     printf '%s\n' "$ctl_output" | sed 's/^/      /'
   else
     warn "    - gitlab-ctl status не вернул данных"
+    issues+=("gitlab-ctl status не вернул данных")
   fi
 
   if [ "$check_db" -eq 1 ]; then
@@ -231,10 +306,34 @@ report_basic_health() {
       log "    - PostgreSQL: SELECT 1 выполняется"
     else
       warn "    - PostgreSQL: нет ответа на SELECT 1"
+      issues+=("PostgreSQL SELECT 1 не выполняется")
     fi
   else
     log "    - PostgreSQL: проверка пропущена (ожидаем готовность)"
   fi
+
+  if [ "${http_rc:-1}" -ne 0 ]; then
+    issues+=("HTTP (из контейнера): ${http_info:-проверка не выполнена}")
+  fi
+  if [ "${host_http_rc:-1}" -ne 0 ]; then
+    issues+=("HTTP (с хоста): ${host_http_info:-проверка не выполнена}")
+  fi
+
+  if [ ${#issues[@]} -gt 0 ]; then
+    LAST_HEALTH_OK=0
+    LAST_HEALTH_ISSUES=$(IFS='; '; echo "${issues[*]}")
+  else
+    LAST_HEALTH_OK=1
+    LAST_HEALTH_ISSUES="OK"
+  fi
+
+  return 0
+}
+
+ensure_gitlab_health() {
+  local context="$1" mode="${2-}"
+  report_basic_health "$context" "$mode"
+  [ "${LAST_HEALTH_OK:-0}" = "1" ]
 }
 
 ensure_permissions() {

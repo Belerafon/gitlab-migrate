@@ -74,6 +74,51 @@ generate_migration_report() {
   log "\n=== КОНЕЦ ОТЧЕТА ==="
 }
 
+print_host_log_hint() {
+  log "    - Лог миграции (host): $LOG_FILE"
+  log "    - Логи GitLab (host): $DATA_ROOT/logs"
+  log "    - Последние события контейнера: docker logs --tail 200 $CONTAINER_NAME"
+}
+
+manual_checkpoint() {
+  local context="$1" state_key="${2-}" mode="${3-}" loop_prompt
+
+  if [ -n "$state_key" ] && [ "$(get_state "$state_key" || true)" = "1" ]; then
+    ok "Контрольная точка (${context}) уже подтверждена — пропускаю"
+    return 0
+  fi
+
+  log "[>] Контрольная точка: ${context}"
+
+  while true; do
+    if ensure_gitlab_health "$context" "$mode"; then
+      ok "Автоматические проверки (${context}) пройдены"
+    else
+      warn "Автоматическая проверка (${context}) выявила проблемы: ${LAST_HEALTH_ISSUES:-unknown}"
+      log "    - HTTP (контейнер): ${LAST_HEALTH_HTTP_INFO:-n/a}"
+      log "    - HTTP (хост): ${LAST_HEALTH_HOST_HTTP_INFO:-n/a}"
+      print_host_log_hint
+    fi
+
+    log "    - Проверь вручную веб-интерфейс: https://<твой-домен>:$PORT_HTTPS (или http://<домен>:$PORT_HTTP)"
+    log "    - Убедись, что можно войти через SSH по порту $PORT_SSH (при необходимости)"
+
+    if ask_yes_no "Подтверди, что GitLab работает корректно (${context}) и можно продолжать?" "n"; then
+      if [ "${LAST_HEALTH_OK:-0}" != "1" ]; then
+        warn "Продолжаем несмотря на обнаруженные автоматикой проблемы (${LAST_HEALTH_ISSUES:-unknown})"
+      fi
+      if [ -n "$state_key" ]; then
+        set_state "$state_key" 1
+      fi
+      ok "Контрольная точка (${context}) подтверждена пользователем"
+      break
+    fi
+
+    log "[>] Приостанавливаюсь. После устранения проблем нажми Enter для повторной проверки (Ctrl+C для выхода)"
+    read -r -p "    Enter для повторной проверки или Ctrl+C для прерывания..." loop_prompt || true
+  done
+}
+
 error_trap() {
   trap - ERR
   set +e

@@ -190,37 +190,49 @@ probe_gitlab_http() {
 }
 
 probe_gitlab_http_host() {
-  local http_port="${PORT_HTTP:-80}" https_port="${PORT_HTTPS:-443}"
-  local endpoints=(
-    "http://127.0.0.1:${http_port}/-/readiness|host readiness (HTTP:${http_port})"
-    "http://127.0.0.1:${http_port}/users/sign_in|host login (HTTP:${http_port})"
-    "https://127.0.0.1:${https_port}/-/readiness|host readiness (HTTPS:${https_port})"
-    "https://127.0.0.1:${https_port}/users/sign_in|host login (HTTPS:${https_port})"
-  )
+  local http_port="${PORT_HTTP:-80}"
+  local raw_host="${HOST_IP:-}"
+  local effective_host="" url_host="" url="" desc="" display_url=""
   local attempts=()
-  local entry url desc opts output code clean_output
+  local output code clean_output summary
+  local -a curl_args
 
   if ! command -v curl >/dev/null 2>&1; then
     printf '%s' "curl недоступен на хосте"
     return 1
   fi
 
-  for entry in "${endpoints[@]}"; do
-    IFS='|' read -r url desc <<<"$entry"
-    opts='-sS --max-time 10 --connect-timeout 5 -o /dev/null -w %{http_code}'
-    [[ "$url" == https://* ]] && opts='-ksS --max-time 10 --connect-timeout 5 -o /dev/null -w %{http_code}'
-    output=$(curl ${opts} "$url" 2>&1 || true)
-    output="${output//$'\r'/}"
-    code="${output##*$'\n'}"
-    clean_output="${output//$'\n'/ }"
-    attempts+=("${desc}: ${clean_output:-n/a}")
-    if [[ "$code" =~ ^[0-9]{3}$ ]] && [ "$code" != "000" ]; then
-      printf 'HTTP %s (%s)' "$code" "$desc"
-      return 0
-    fi
-  done
+  if [ -z "$raw_host" ] || [ "$raw_host" = "0.0.0.0" ]; then
+    effective_host="127.0.0.1"
+  else
+    effective_host="$raw_host"
+  fi
 
-  local summary
+  url_host="$effective_host"
+  if [[ "$url_host" == *:* ]] && [[ "$url_host" != \[* ]]; then
+    url_host="[${url_host}]"
+  fi
+
+  url="http://${url_host}:${http_port}/users/sign_in"
+  display_url="$url"
+  desc="host login (${display_url})"
+
+  curl_args=(-sS --max-time 10 --connect-timeout 5 -o /dev/null -w "%{http_code}")
+  output=$(curl "${curl_args[@]}" "$url" 2>&1 || true)
+  output="${output//$'\r'/}"
+  code="${output##*$'\n'}"
+  clean_output="${output//$'\n'/ }"
+  attempts+=("${desc}: ${clean_output:-n/a}")
+
+  if [[ "$code" =~ ^[0-9]{3}$ ]]; then
+    case "$code" in
+      2??|3??|401|403)
+        printf 'HTTP %s (%s)' "$code" "$desc"
+        return 0
+        ;;
+    esac
+  fi
+
   summary=$(IFS='; '; echo "${attempts[*]}")
   printf 'HTTP недоступен (%s)' "$summary"
   return 1

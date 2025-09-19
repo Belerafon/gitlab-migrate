@@ -4,6 +4,7 @@ LAST_HEALTH_OK=1
 LAST_HEALTH_ISSUES=""
 LAST_HEALTH_HTTP_INFO=""
 LAST_HEALTH_HOST_HTTP_INFO=""
+HTTP_FAILURE_HINT_SHOWN=0
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
 docker_ok() {
@@ -331,6 +332,10 @@ report_basic_health() {
     issues+=("HTTP (с хоста): ${host_http_info:-проверка не выполнена}")
   fi
 
+  if [ "${http_rc:-1}" -ne 0 ] || [ "${host_http_rc:-1}" -ne 0 ]; then
+    print_http_failure_diagnostics "$context"
+  fi
+
   if [ ${#issues[@]} -gt 0 ]; then
     LAST_HEALTH_OK=0
     LAST_HEALTH_ISSUES=$(IFS='; '; echo "${issues[*]}")
@@ -340,6 +345,56 @@ report_basic_health() {
   fi
 
   return 0
+}
+
+print_http_failure_diagnostics() {
+  local context="$1"
+
+  log "    - Диагностика HTTP (${context:-без контекста}):"
+
+  if [ "${HTTP_FAILURE_HINT_SHOWN:-0}" -eq 0 ]; then
+    log "      Где искать дополнительную информацию на хосте:"
+    log "        Лог миграции: $LOG_FILE"
+    log "        Логи GitLab: $DATA_ROOT/logs"
+    HTTP_FAILURE_HINT_SHOWN=1
+  fi
+
+  if ! container_running; then
+    log "      Контейнер ${CONTAINER_NAME} не запущен — HTTP недоступен и логи не собрать"
+    return
+  fi
+
+  local script
+  script=$(cat <<'EOS'
+for file in \
+  /var/log/gitlab/gitlab-workhorse/current \
+  /var/log/gitlab/nginx/current \
+  /var/log/gitlab/nginx/gitlab_error.log \
+  /var/log/gitlab/puma/puma_stdout.log \
+  /var/log/gitlab/puma/puma_stderr.log \
+  /var/log/gitlab/gitlab-rails/production.log; do
+  if [ -f "$file" ]; then
+    echo "----- $file -----"
+    if command -v tai64nlocal >/dev/null 2>&1 && [ "${file##*/}" = "current" ]; then
+      tail -n 40 "$file" | tai64nlocal
+    else
+      tail -n 40 "$file"
+    fi
+    echo
+  fi
+done
+EOS
+)
+
+  if [ -n "$script" ]; then
+    dexec "$script" 2>&1 | sed 's/^/      /' >&2 || true
+  fi
+
+  log "      Команды для ручной диагностики:"
+  log "        docker logs --tail 200 $CONTAINER_NAME"
+  log "        docker exec -it $CONTAINER_NAME gitlab-ctl tail nginx"
+  log "        docker exec -it $CONTAINER_NAME gitlab-ctl tail gitlab-workhorse"
+  log "        docker exec -it $CONTAINER_NAME gitlab-ctl tail puma"
 }
 
 ensure_gitlab_health() {

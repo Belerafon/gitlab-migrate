@@ -400,13 +400,7 @@ verify_restore_success() {
   log "  - Ишью: $issue_count"
 
   log "[>] Проверка фоновых миграций…"
-  if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
-    if ! dexec 'gitlab-rake gitlab:background_migrations:status'; then
-      warn "Задача gitlab:background_migrations:status завершилась с ошибкой"
-    fi
-  else
-    log "  - Задача gitlab:background_migrations:status недоступна в этой версии GitLab"
-  fi
+  background_migrations_status_report "  " || true
 
   log "[>] Размер восстановленных данных:"
   dexec 'du -sh /var/opt/gitlab/git-data/repositories | awk '\''{print "  - Репозитории: "$1}'\'' || true'

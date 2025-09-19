@@ -291,11 +291,7 @@ upgrade_to_series() {
     log_gitlab_instance_stats
 
     log "[>] Статус фоновых миграций (если задача есть):"
-    if dexec 'gitlab-rake -T 2>/dev/null | grep -q gitlab:background_migrations:status'; then
-      dexec 'gitlab-rake gitlab:background_migrations:status' || warn "Задача gitlab:background_migrations:status завершилась с ошибкой"
-    else
-      echo "(task not available)" >&2
-    fi
+    background_migrations_status_report "  " || true
   
     # Additional check for successful upgrade
     local current_version current_base target_base

@@ -8,6 +8,7 @@ latest_patch_tag() {
     "13.12") echo "13.12.15-ce.0" ;;
     "14.0")  echo "14.0.12-ce.0" ;;
     "14.10") echo "14.10.5-ce.0" ;;
+    "15.0")  echo "15.0.5-ce.0" ;;
     "15.11") echo "15.11.13-ce.0" ;;
     "16.11") echo "16.11.3-ce.0" ;;
     "17")    echo "17.0.0-ce.0" ;;
@@ -51,6 +52,7 @@ compute_stops() {
   echo "13.12"
   echo "14.0"
   echo "14.10"
+  echo "15.0"
   echo "15.11"
   echo "16.11"
   [ "$DO_TARGET_17" = "yes" ] && echo "17"

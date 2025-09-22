@@ -3,6 +3,147 @@
 # Source docker lib for container_running function
 . "$BASEDIR/lib/docker.sh"
 
+summarize_reconfigure_log() {
+  local log_file="$1" outcome="${2:-успех}" max_changed_preview=8 max_stage_lines=10
+
+  if [ ! -f "$log_file" ]; then
+    warn "[chef] Лог reconfigure не найден: ${log_file}"
+    return
+  fi
+
+  log "[chef] Сводка gitlab-ctl reconfigure (${outcome}):"
+
+  local chef_summary
+  chef_summary=$(awk '/Chef Infra Client (finished|failed)/ {line=$0} END {if (length(line)) print line}' "$log_file" 2>/dev/null || true)
+  if [ -n "$chef_summary" ]; then
+    log "    - ${chef_summary}"
+  else
+    log "    - Итоговая строка Chef не найдена (см. лог)"
+  fi
+
+  local chef_updated chef_total
+  chef_updated=$(awk 'match($0, /Chef Infra Client finished, ([0-9]+)\/([0-9]+) resources updated/, m) {updated=m[1]; total=m[2]} END {if (updated == "") updated="unknown"; print updated}' "$log_file" 2>/dev/null || true)
+  chef_total=$(awk 'match($0, /Chef Infra Client finished, ([0-9]+)\/([0-9]+) resources updated/, m) {updated=m[1]; total=m[2]} END {if (total == "") total="unknown"; print total}' "$log_file" 2>/dev/null || true)
+  if [ "$chef_updated" != "unknown" ] && [ "$chef_total" != "unknown" ]; then
+    log "    - Обновлено ресурсов (по Chef): ${chef_updated}/${chef_total}"
+  fi
+
+  local changed_lines changed_count
+  mapfile -t changed_lines < <(awk '
+    function flush_current() {
+      if (length(current_line) == 0) {
+        return
+      }
+      if (state == "changed") {
+        line=current_line
+        sub(/^[[:space:]]+/, "", line)
+        if (!seen[line]++) {
+          list[count++] = line
+        }
+      }
+      current_line=""
+      state="unknown"
+    }
+
+    /^[[:space:]]*\*/ && / action / {
+      flush_current()
+      if ($0 ~ /\(up to date\)/) next
+      if ($0 ~ /\(skipped/)) next
+      current_line=$0
+      state="unknown"
+      next
+    }
+
+    {
+      if (length(current_line) == 0) {
+        next
+      }
+      if ($0 ~ /\(up to date\)/ || $0 ~ /\(skipped/)) {
+        if (state != "changed") {
+          state="noop"
+        }
+      }
+      if ($0 ~ /^[[:space:]]*-/) {
+        state="changed"
+      }
+    }
+
+    END {
+      flush_current()
+      for (i = 0; i < count; i++) print list[i]
+    }
+  ' "$log_file" 2>/dev/null)
+  changed_count=${#changed_lines[@]}
+  if [ "$changed_count" -gt 0 ]; then
+    log "    - Ресурсы с изменениями (по анализу лога): ${changed_count}"
+    local limit=$max_changed_preview
+    if [ "$changed_count" -lt "$limit" ]; then
+      limit=$changed_count
+    fi
+    local i
+    for ((i = 0; i < limit; i++)); do
+      log "        • ${changed_lines[$i]}"
+    done
+    if [ "$changed_count" -gt "$limit" ]; then
+      log "        … и ещё $((changed_count - limit)) ресурсов (см. полный лог)"
+    fi
+  else
+    log "    - Ресурсы с изменениями не обнаружены (по анализу лога)"
+  fi
+
+  local skipped_count up_to_date_count
+  skipped_count=$(awk 'BEGIN {c=0} /\(skipped due to/ {c++} END {print c}' "$log_file" 2>/dev/null || true)
+  up_to_date_count=$(awk 'BEGIN {c=0} /\(up to date\)/ {c++} END {print c}' "$log_file" 2>/dev/null || true)
+  log "    - Пропущено ресурсов (skip): ${skipped_count}"
+  log "    - Уже в актуальном состоянии (up to date): ${up_to_date_count}"
+
+  local stage_lines=()
+  mapfile -t stage_lines < <(awk '
+    /^[[:space:]]*(Running reconfigure|Waiting for Database|Database upgrade is complete|Toggling deploy page|Toggling services|==== Upgrade has completed ====|Please verify everything is working)/ {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      print line
+    }
+  ' "$log_file" 2>/dev/null)
+  if [ ${#stage_lines[@]} -gt 0 ]; then
+    log "    - Ключевые статусы:" 
+    local start=0 total=${#stage_lines[@]}
+    if [ "$total" -gt "$max_stage_lines" ]; then
+      start=$((total - max_stage_lines))
+    fi
+    local i
+    for ((i = start; i < total; i++)); do
+      log "        ${stage_lines[$i]}"
+    done
+  fi
+
+  local warnings=()
+  mapfile -t warnings < <(awk 'BEGIN {IGNORECASE=1} /warn|error|fatal|critical/ {print}' "$log_file" 2>/dev/null | tail -n5)
+  if [ ${#warnings[@]} -gt 0 ]; then
+    log "    - Последние предупреждения/ошибки:"
+    local w
+    for w in "${warnings[@]}"; do
+      log "        ${w}"
+    done
+  fi
+
+  log "    - Полный лог: ${log_file}"
+}
+
+print_reconfigure_failure_excerpt() {
+  local log_file="$1" lines="${2:-60}"
+
+  [ -f "$log_file" ] || return
+
+  log "[chef] Последние значимые строки (отфильтрованы 'up to date'/'skipped'):"
+  awk '
+    /\(up to date\)/ {next}
+    /\(skipped due to/ {next}
+    /^[[:space:]]*$/ {next}
+    {print}
+  ' "$log_file" 2>/dev/null | tail -n "$lines" | sed 's/^/        /'
+}
+
 run_reconfigure() {
   local cmd="${1:-gitlab-ctl reconfigure}"
   local rlog_container="/var/log/gitlab/reconfigure.log"
@@ -11,10 +152,21 @@ run_reconfigure() {
 
   local filter_script
   filter_script=$(cat <<'EOF'
-awk 'BEGIN {IGNORECASE=1}
-  /^(Starting Chef Infra Client|Chef Infra Client finished|Running handlers|Running handlers complete)/ {print "[chef] " $0; fflush(); next}
-  /^Recipe: / {print "[chef] " $0; fflush(); next}
-  index($0, "error") || index($0, "warn") || index($0, "fatal") || index($0, "critical") {print "[chef] " $0; fflush(); next}
+awk '
+  {
+    line=$0
+    lcline=tolower(line)
+    if (line ~ /^(Starting Chef Infra Client|Chef Infra Client finished|Running handlers|Running handlers complete)/) {print "[chef] " line; fflush(); next}
+    if (line ~ /^Recipe: /) {print "[chef] " line; fflush(); next}
+    if (line ~ /^[[:space:]]*(Running reconfigure|Waiting for Database|Database upgrade is complete|Toggling deploy page|Toggling services|==== Upgrade has completed ====|Please verify everything is working)/) {
+      stage=line
+      sub(/^[[:space:]]+/, "", stage)
+      print "[chef] " stage
+      fflush()
+      next
+    }
+    if (index(lcline, "error") || index(lcline, "warn") || index(lcline, "fatal") || index(lcline, "critical")) {print "[chef] " line; fflush(); next}
+  }
 '
 EOF
   )
@@ -22,10 +174,11 @@ EOF
   log "[>] Выполняю ${cmd} (подробный лог: ${rlog_host})"
 
   if dexec "set -o pipefail; $cmd |& tee '$rlog_container' | $filter_script"; then
-    tail -n 20 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
+    summarize_reconfigure_log "$rlog_host" "успех"
     return 0
   else
-    tail -n 50 "$rlog_host" | sed -e 's/^/    /' || warn "лог reconfigure не найден"
+    summarize_reconfigure_log "$rlog_host" "ошибка"
+    print_reconfigure_failure_excerpt "$rlog_host"
     err "gitlab-ctl reconfigure завершился с ошибкой. Лог: $rlog_host"
     return 1
   fi

@@ -5,6 +5,8 @@ LAST_HEALTH_ISSUES=""
 LAST_HEALTH_HTTP_INFO=""
 LAST_HEALTH_HOST_HTTP_INFO=""
 HTTP_FAILURE_HINT_SHOWN=0
+DEXEC_LAST_WAIT_MSG=""
+DEXEC_LAST_WAIT_TS=0
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
 docker_ok() {
@@ -18,15 +20,81 @@ docker_ok() {
 
 # Use non-login shell to avoid TTY errors
 dexec() {
-  local cmd="$1" out rc
-  # Выполняем команду и сохраняем stdout/stderr вместе с кодом возврата
-  out=$(docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1)
-  rc=$?
-  # Фильтруем надоедливое предупреждение mesg
-  out=$(printf "%s" "$out" | grep -v "mesg: ttyname failed")
-  printf "%s" "$out"
+  local cmd="$1" out rc status should_retry=0 attempts=0 waited=0
+  local max_attempts=${DEXEC_WAIT_RETRIES:-60}
+  local sleep_between=${DEXEC_WAIT_INTERVAL:-3}
+  local log_interval=${DEXEC_WAIT_LOG_INTERVAL:-30}
+  local message now
 
-  # Если docker exec провалился, покажем диагностическую информацию
+  while true; do
+    out=$(docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1)
+    rc=$?
+    out=$(printf "%s" "$out" | grep -v "mesg: ttyname failed")
+
+    if [ $rc -eq 0 ]; then
+      DEXEC_LAST_WAIT_MSG=""
+      DEXEC_LAST_WAIT_TS=0
+      printf "%s" "$out"
+      return 0
+    fi
+
+    status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+    should_retry=0
+
+    if [[ "$out" == *"is restarting"* ]] || [[ "$out" == *"No such container"* ]] || [[ "$out" == *"not running"* ]] || [[ "$out" == *"cannot exec in a stopped state"* ]]; then
+      should_retry=1
+    fi
+
+    case "$status" in
+      restarting|created|starting)
+        should_retry=1
+        ;;
+    esac
+
+    if [ $should_retry -eq 1 ] && [ $attempts -lt $max_attempts ]; then
+      local short_cmd="$cmd"
+      short_cmd=${short_cmd//$'\n'/ }
+      short_cmd=${short_cmd//$'\r'/ }
+      short_cmd=${short_cmd//$'\t'/ }
+      while [[ "$short_cmd" == *"  "* ]]; do
+        short_cmd=${short_cmd//  / }
+      done
+      while [[ "$short_cmd" == ' '* ]]; do
+        short_cmd=${short_cmd# }
+      done
+      while [[ "$short_cmd" == *' ' ]]; do
+        short_cmd=${short_cmd% }
+      done
+      if [ ${#short_cmd} -gt 120 ]; then
+        short_cmd="${short_cmd:0:117}..."
+      fi
+
+      message="[dexec] Контейнер ${CONTAINER_NAME} в состоянии ${status} — ожидаю запуска (повтор: ${short_cmd:-bash -c})"
+
+      now=$(date +%s)
+      if [ -z "${DEXEC_LAST_WAIT_MSG:-}" ] || [ "$message" != "$DEXEC_LAST_WAIT_MSG" ] || [ $((now - ${DEXEC_LAST_WAIT_TS:-0})) -ge "$log_interval" ]; then
+        warn "$message"
+        DEXEC_LAST_WAIT_MSG="$message"
+        DEXEC_LAST_WAIT_TS=$now
+      fi
+
+      sleep "$sleep_between"
+      attempts=$((attempts + 1))
+      waited=$((waited + sleep_between))
+      continue
+    fi
+
+    if [ $should_retry -eq 1 ]; then
+      warn "[dexec] Контейнер ${CONTAINER_NAME} не стал доступен за ${waited}s (последний статус: ${status})"
+    fi
+
+    break
+  done
+
+  if [ -n "$out" ]; then
+    printf "%s" "$out"
+  fi
+
   if [ $rc -ne 0 ] && { [[ "$out" == *"OCI runtime exec failed"* ]] || ! container_running; }; then
     warn "[dexec] docker exec завершился с кодом $rc"
     log "------ Статус контейнера ------"

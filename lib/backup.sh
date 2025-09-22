@@ -2,6 +2,8 @@
 # shellcheck shell=bash
 # Source docker lib for container_running function
 . "$BASEDIR/lib/docker.sh"
+# Chef helpers for сжатого вывода reconfigure
+. "$BASEDIR/lib/chef.sh"
 
 summarize_reconfigure_log() {
   local log_file="$1" outcome="${2:-успех}" max_changed_preview=8 max_stage_lines=10
@@ -135,13 +137,19 @@ print_reconfigure_failure_excerpt() {
 
   [ -f "$log_file" ] || return
 
-  log "[chef] Последние значимые строки (отфильтрованы 'up to date'/'skipped'):"
-  awk '
-    /\(up to date\)/ {next}
-    /\(skipped due to/ {next}
-    /^[[:space:]]*$/ {next}
-    {print}
-  ' "$log_file" 2>/dev/null | tail -n "$lines" | sed 's/^/        /'
+  log "[chef] Последние ключевые события (по фильтру Chef):"
+
+  local excerpt_rc filter_rc
+  set +e
+  chef_filter_log_file "$log_file" 2>/dev/null | tail -n "$lines" | sed 's/^/        /'
+  excerpt_rc=$?
+  filter_rc=${PIPESTATUS[0]:-0}
+  set -e
+
+  if [ "${filter_rc:-0}" -ne 0 ] || [ "${excerpt_rc:-0}" -ne 0 ]; then
+    log "        (не удалось применить фильтр — показываю необработанные строки)"
+    tail -n "$lines" "$log_file" | sed 's/^/        /'
+  fi
 }
 
 run_reconfigure() {
@@ -149,39 +157,44 @@ run_reconfigure() {
   local rlog_container="/var/log/gitlab/reconfigure.log"
   local rlog_host="${DATA_ROOT}/logs/reconfigure.log"
   rm -f "$rlog_host" 2>/dev/null || true
-
-  local filter_script
-  filter_script=$(cat <<'EOF'
-awk '
-  {
-    line=$0
-    lcline=tolower(line)
-    if (line ~ /^(Starting Chef Infra Client|Chef Infra Client finished|Running handlers|Running handlers complete)/) {print "[chef] " line; fflush(); next}
-    if (line ~ /^Recipe: /) {print "[chef] " line; fflush(); next}
-    if (line ~ /^[[:space:]]*(Running reconfigure|Waiting for Database|Database upgrade is complete|Toggling deploy page|Toggling services|==== Upgrade has completed ====|Please verify everything is working)/) {
-      stage=line
-      sub(/^[[:space:]]+/, "", stage)
-      print "[chef] " stage
-      fflush()
-      next
-    }
-    if (index(lcline, "error") || index(lcline, "warn") || index(lcline, "fatal") || index(lcline, "critical")) {print "[chef] " line; fflush(); next}
-  }
-'
-EOF
-  )
-
   log "[>] Выполняю ${cmd} (подробный лог: ${rlog_host})"
+  log "[chef] Вывожу ключевые события Chef в реальном времени (подробности см. в логе)"
 
-  if dexec "set -o pipefail; $cmd |& tee '$rlog_container' | $filter_script"; then
-    summarize_reconfigure_log "$rlog_host" "успех"
-    return 0
-  else
-    summarize_reconfigure_log "$rlog_host" "ошибка"
-    print_reconfigure_failure_excerpt "$rlog_host"
-    err "gitlab-ctl reconfigure завершился с ошибкой. Лог: $rlog_host"
-    return 1
+  local start_ts
+  start_ts=$(date +%s)
+
+  local dexec_rc filter_rc
+  dexec_rc=0
+  filter_rc=0
+
+  set +e
+  dexec "set -o pipefail; $cmd |& tee '$rlog_container'" \
+    | chef_filter_stream
+  dexec_rc=${PIPESTATUS[0]:-0}
+  filter_rc=${PIPESTATUS[1]:-0}
+  set -e
+
+  local end_ts duration
+  end_ts=$(date +%s)
+  duration=$((end_ts - start_ts))
+
+  if [ "${filter_rc:-0}" -ne 0 ]; then
+    warn "[chef] Фильтр вывода Chef завершился с кодом ${filter_rc} — смотри полный лог: ${rlog_host}"
   fi
+
+  log "[chef] Продолжительность gitlab-ctl reconfigure: $(format_duration "${duration}")"
+
+  if [ "${dexec_rc:-0}" -eq 0 ]; then
+    summarize_reconfigure_log "$rlog_host" "успех"
+    report_basic_health "после gitlab-ctl reconfigure" "skip-db"
+    return 0
+  fi
+
+  summarize_reconfigure_log "$rlog_host" "ошибка"
+  print_reconfigure_failure_excerpt "$rlog_host"
+  report_basic_health "после ошибки gitlab-ctl reconfigure" "skip-db"
+  err "gitlab-ctl reconfigure завершился с ошибкой. Лог: $rlog_host"
+  return 1
 }
 
 find_latest_backup_in_src() {

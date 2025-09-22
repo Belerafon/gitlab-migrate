@@ -5,8 +5,45 @@ LAST_HEALTH_ISSUES=""
 LAST_HEALTH_HTTP_INFO=""
 LAST_HEALTH_HOST_HTTP_INFO=""
 HTTP_FAILURE_HINT_SHOWN=0
-DEXEC_LAST_WAIT_MSG=""
-DEXEC_LAST_WAIT_TS=0
+declare -Ag DEXEC_WAIT_LOG_TS=()
+
+dexec_shorten_command() {
+  local cmd="$1"
+  cmd=${cmd//$'\n'/ }
+  cmd=${cmd//$'\r'/ }
+  cmd=${cmd//$'\t'/ }
+  while [[ "$cmd" == *"  "* ]]; do
+    cmd=${cmd//  / }
+  done
+  while [[ "$cmd" == ' '* ]]; do
+    cmd=${cmd# }
+  done
+  while [[ "$cmd" == *' ' ]]; do
+    cmd=${cmd% }
+  done
+  if [ ${#cmd} -gt 120 ]; then
+    cmd="${cmd:0:117}..."
+  fi
+  printf "%s" "$cmd"
+}
+
+dexec_should_log_wait() {
+  local message="$1" interval="${2:-30}" now last
+  now=$(date +%s)
+  last=${DEXEC_WAIT_LOG_TS["$message"]:-0}
+
+  if [ "$interval" -le 0 ]; then
+    DEXEC_WAIT_LOG_TS["$message"]=$now
+    return 0
+  fi
+
+  if [ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ]; then
+    DEXEC_WAIT_LOG_TS["$message"]=$now
+    return 0
+  fi
+
+  return 1
+}
 need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { err "Запусти как root"; exit 1; }; }
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { err "Нужна команда '$1'"; exit 1; }; }
 docker_ok() {
@@ -24,16 +61,17 @@ dexec() {
   local max_attempts=${DEXEC_WAIT_RETRIES:-60}
   local sleep_between=${DEXEC_WAIT_INTERVAL:-3}
   local log_interval=${DEXEC_WAIT_LOG_INTERVAL:-30}
-  local message now
+  local short_cmd="" last_short_cmd="" message
 
   while true; do
     out=$(docker exec -i "$CONTAINER_NAME" bash -c "$cmd" 2>&1)
     rc=$?
     out=$(printf "%s" "$out" | grep -v "mesg: ttyname failed")
 
-    if [ $rc -eq 0 ]; then
-      DEXEC_LAST_WAIT_MSG=""
-      DEXEC_LAST_WAIT_TS=0
+    if [ "$rc" -eq 0 ]; then
+      if [ "$attempts" -gt 0 ]; then
+        log "[wait] Команда (${last_short_cmd:-bash -c}) выполнилась после ожидания $(format_duration "$waited") (повторов: ${attempts})"
+      fi
       printf "%s" "$out"
       return 0
     fi
@@ -51,41 +89,21 @@ dexec() {
         ;;
     esac
 
-    if [ $should_retry -eq 1 ] && [ $attempts -lt $max_attempts ]; then
-      local short_cmd="$cmd"
-      short_cmd=${short_cmd//$'\n'/ }
-      short_cmd=${short_cmd//$'\r'/ }
-      short_cmd=${short_cmd//$'\t'/ }
-      while [[ "$short_cmd" == *"  "* ]]; do
-        short_cmd=${short_cmd//  / }
-      done
-      while [[ "$short_cmd" == ' '* ]]; do
-        short_cmd=${short_cmd# }
-      done
-      while [[ "$short_cmd" == *' ' ]]; do
-        short_cmd=${short_cmd% }
-      done
-      if [ ${#short_cmd} -gt 120 ]; then
-        short_cmd="${short_cmd:0:117}..."
+    if [ "$should_retry" -eq 1 ] && [ "$attempts" -lt "$max_attempts" ]; then
+      short_cmd=$(dexec_shorten_command "$cmd")
+      message="Контейнер ${CONTAINER_NAME} в состоянии ${status} — ожидаю запуска (повтор: ${short_cmd:-bash -c})"
+      if dexec_should_log_wait "$message" "$log_interval"; then
+        log "[wait] ${message}"
       fi
-
-      message="[dexec] Контейнер ${CONTAINER_NAME} в состоянии ${status} — ожидаю запуска (повтор: ${short_cmd:-bash -c})"
-
-      now=$(date +%s)
-      if [ -z "${DEXEC_LAST_WAIT_MSG:-}" ] || [ "$message" != "$DEXEC_LAST_WAIT_MSG" ] || [ $((now - ${DEXEC_LAST_WAIT_TS:-0})) -ge "$log_interval" ]; then
-        warn "$message"
-        DEXEC_LAST_WAIT_MSG="$message"
-        DEXEC_LAST_WAIT_TS=$now
-      fi
-
+      last_short_cmd="$short_cmd"
       sleep "$sleep_between"
       attempts=$((attempts + 1))
       waited=$((waited + sleep_between))
       continue
     fi
 
-    if [ $should_retry -eq 1 ]; then
-      warn "[dexec] Контейнер ${CONTAINER_NAME} не стал доступен за ${waited}s (последний статус: ${status})"
+    if [ "$should_retry" -eq 1 ]; then
+      warn "[dexec] Контейнер ${CONTAINER_NAME} не стал доступен за $(format_duration "$waited") (последний статус: ${status})"
     fi
 
     break
@@ -95,12 +113,16 @@ dexec() {
     printf "%s" "$out"
   fi
 
-  if [ $rc -ne 0 ] && { [[ "$out" == *"OCI runtime exec failed"* ]] || ! container_running; }; then
+  if [ "$rc" -ne 0 ] && { [[ "$out" == *"OCI runtime exec failed"* ]] || ! container_running; }; then
     warn "[dexec] docker exec завершился с кодом $rc"
     log "------ Статус контейнера ------"
     docker ps -a --filter "name=$CONTAINER_NAME" 2>&1 || true
     log "------ Подсказка по логам ------"
     log "docker logs --tail 20 $CONTAINER_NAME"
+  fi
+
+  if [ "$attempts" -gt 0 ]; then
+    log "[wait] Команда (${last_short_cmd:-bash -c}) не завершилась успешно после ожидания $(format_duration "$waited") (повторов: ${attempts})"
   fi
 
   return $rc
@@ -113,6 +135,14 @@ container_running() {
 container_restart_count() {
   # Suppress TTY allocation errors
   docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null | grep -v "mesg: ttyname failed" || echo 0
+}
+
+container_status_summary() {
+  local status health restarts
+  status=$(docker inspect -f 'status={{.State.Status}}, pid={{.State.Pid}}' "$CONTAINER_NAME" 2>/dev/null || echo "status=unknown")
+  health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+  restarts=$(container_restart_count)
+  printf "%s; health=%s; restarts=%s" "$status" "$health" "$restarts"
 }
 
 permissions_mark_pending() {
@@ -561,28 +591,66 @@ wait_gitlab_ready() {
 
 wait_postgres_ready() {
   log "[>] Ожидаю PostgreSQL (unix socket и статус)…"
-  local waited=0 timeout=${POSTGRES_READY_TIMEOUT:-$READY_TIMEOUT}
+  local timeout=${POSTGRES_READY_TIMEOUT:-$READY_TIMEOUT}
+  local progress=${POSTGRES_READY_PROGRESS:-30}
+  local waited=0 socket_waited=0
+  local reconfigure_attempts=0
+  local fmt_timeout="∞"
+
+  if [ "${timeout:-0}" -gt 0 ]; then
+    fmt_timeout=$(format_duration "$timeout")
+  fi
+
   until dexec 'test -S /var/opt/gitlab/postgresql/.s.PGSQL.5432 && gitlab-ctl status postgresql >/dev/null 2>&1'; do
-    sleep 3; waited=$((waited+3))
-    if [ "$waited" -ge "$timeout" ]; then
-      warn "PostgreSQL не поднялся за ${timeout}s — запускаю reconfigure и продолжаю ждать"
+    sleep 3
+    waited=$((waited + 3))
+
+    if [ "${progress:-0}" -gt 0 ] && [ $((waited % progress)) -eq 0 ]; then
+      if [ "${timeout:-0}" -gt 0 ]; then
+        log "[wait] PostgreSQL ещё не поднялся (ожидание $(format_duration "$waited") из ${fmt_timeout}). Статус контейнера: $(container_status_summary)"
+      else
+        log "[wait] PostgreSQL ещё не поднялся (ожидание $(format_duration "$waited")). Статус контейнера: $(container_status_summary)"
+      fi
+    fi
+
+    if [ "${timeout:-0}" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+      reconfigure_attempts=$((reconfigure_attempts + 1))
+      warn "PostgreSQL не поднялся за ${fmt_timeout} — запускаю reconfigure и продолжаю ждать (попытка ${reconfigure_attempts})"
       dexec 'gitlab-ctl reconfigure >/dev/null 2>&1 || true'
       waited=0
     fi
   done
+
+  socket_waited=$waited
+  if [ "$socket_waited" -gt 0 ]; then
+    log "[wait] Unix socket PostgreSQL стал доступен через $(format_duration "$socket_waited")"
+  fi
+
   # Доппроверка коннекта
   log "[>] Проверяю подключение к PostgreSQL…"
   waited=0
   until dexec 'gitlab-psql -c "SELECT 1;" >/dev/null 2>&1'; do
-    sleep 5; waited=$((waited+5))
-    if [ "$waited" -ge "$timeout" ]; then
-      err "PostgreSQL не принимает подключения за ${timeout}s"
+    sleep 5
+    waited=$((waited + 5))
+
+    if [ "${progress:-0}" -gt 0 ] && [ $((waited % progress)) -eq 0 ]; then
+      if [ "${timeout:-0}" -gt 0 ]; then
+        log "[wait] SELECT 1 ещё не выполняется (ожидание $(format_duration "$waited") из ${fmt_timeout}). Статус контейнера: $(container_status_summary)"
+      else
+        log "[wait] SELECT 1 ещё не выполняется (ожидание $(format_duration "$waited")). Статус контейнера: $(container_status_summary)"
+      fi
+    fi
+
+    if [ "${timeout:-0}" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+      err "PostgreSQL не принимает подключения за ${fmt_timeout}"
+      log "[status] Текущий статус контейнера: $(container_status_summary)"
       log "[status] Последние строки /var/log/gitlab/postgresql/current:"
       dexec 'tail -n 20 /var/log/gitlab/postgresql/current' 2>&1 \
         | sed -e "s/^/[status] /" >&2 || true
       return 1
     fi
   done
+
   ok "PostgreSQL готов"
   report_basic_health "после ожидания PostgreSQL"
 }

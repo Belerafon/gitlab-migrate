@@ -157,6 +157,207 @@ background_psql_table_exists() {
   return 2
 }
 
+background_table_base_name() {
+  local regclass="$1"
+  regclass="${regclass//\"/}"
+  case "$regclass" in
+    *.*)
+      printf '%s' "${regclass##*.}"
+      ;;
+    *)
+      printf '%s' "$regclass"
+      ;;
+  esac
+}
+
+background_psql_column_type() {
+  local regclass="$1" column="$2" query type_raw type_trimmed
+
+  query="SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = '${regclass}'::regclass AND attname = '${column}'"
+
+  if background_psql "$query"; then
+    type_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+    type_trimmed="$(printf '%s' "$type_raw" | tr -d '[:space:]')"
+    printf '%s' "$type_trimmed"
+    return 0
+  fi
+
+  return 1
+}
+
+background_status_type_is_numeric() {
+  local type="$1"
+
+  case "$type" in
+    smallint|integer|bigint)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+background_status_numeric_value() {
+  local table_base="$1" status_name="$2"
+
+  case "${table_base}:${status_name}" in
+    batched_background_migrations:paused)
+      printf '0'
+      ;;
+    batched_background_migrations:active)
+      printf '1'
+      ;;
+    batched_background_migrations:finished)
+      printf '3'
+      ;;
+    batched_background_migrations:failed)
+      printf '4'
+      ;;
+    batched_background_migrations:finalizing)
+      printf '5'
+      ;;
+    batched_background_migrations:finalized)
+      printf '6'
+      ;;
+    batched_background_migration_jobs:pending)
+      printf '0'
+      ;;
+    batched_background_migration_jobs:running)
+      printf '1'
+      ;;
+    batched_background_migration_jobs:failed)
+      printf '2'
+      ;;
+    batched_background_migration_jobs:finished|batched_background_migration_jobs:succeeded)
+      printf '3'
+      ;;
+    background_migration_jobs:pending)
+      printf '0'
+      ;;
+    background_migration_jobs:running)
+      printf '1'
+      ;;
+    background_migration_jobs:failed|background_migration_jobs:errored)
+      printf '2'
+      ;;
+    background_migration_jobs:finished|background_migration_jobs:succeeded)
+      printf '3'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+background_quote_list() {
+  local items=("$@") item result=""
+
+  for item in "${items[@]}"; do
+    [ -z "$item" ] && continue
+    item="${item//\'/''}"
+    result+="'${item}',"
+  done
+
+  result="${result%,}"
+  printf '%s' "$result"
+}
+
+background_status_case_expression() {
+  local regclass="$1" column="${2:-status}" type base expr=""
+
+  if ! type="$(background_psql_column_type "$regclass" "$column")"; then
+    printf '%s' "$column"
+    return 0
+  fi
+
+  if ! background_status_type_is_numeric "$type"; then
+    printf '%s' "$column"
+    return 0
+  fi
+
+  base="$(background_table_base_name "$regclass")"
+
+  case "$base" in
+    batched_background_migrations)
+      expr="CASE ${column}"
+      expr+=" WHEN 0 THEN 'paused'"
+      expr+=" WHEN 1 THEN 'active'"
+      expr+=" WHEN 3 THEN 'finished'"
+      expr+=" WHEN 4 THEN 'failed'"
+      expr+=" WHEN 5 THEN 'finalizing'"
+      expr+=" WHEN 6 THEN 'finalized'"
+      expr+=" ELSE ${column}::text END"
+      ;;
+    batched_background_migration_jobs)
+      expr="CASE ${column}"
+      expr+=" WHEN 0 THEN 'pending'"
+      expr+=" WHEN 1 THEN 'running'"
+      expr+=" WHEN 2 THEN 'failed'"
+      expr+=" WHEN 3 THEN 'succeeded'"
+      expr+=" ELSE ${column}::text END"
+      ;;
+    background_migration_jobs)
+      expr="CASE ${column}"
+      expr+=" WHEN 0 THEN 'pending'"
+      expr+=" WHEN 1 THEN 'running'"
+      expr+=" WHEN 2 THEN 'failed'"
+      expr+=" WHEN 3 THEN 'succeeded'"
+      expr+=" ELSE ${column}::text END"
+      ;;
+    *)
+      expr="${column}::text"
+      ;;
+  esac
+
+  printf '%s' "$expr"
+}
+
+background_status_filter_condition() {
+  local regclass="$1" column="${2:-status}"
+  shift 2
+  local statuses=("$@") type base values=() value expr quoted joined
+
+  if [ ${#statuses[@]} -eq 0 ]; then
+    printf 'TRUE'
+    return 0
+  fi
+
+  if ! type="$(background_psql_column_type "$regclass" "$column")"; then
+    quoted="$(background_quote_list "${statuses[@]}")"
+    printf '%s NOT IN (%s)' "$column" "$quoted"
+    return 0
+  fi
+
+  if background_status_type_is_numeric "$type"; then
+    base="$(background_table_base_name "$regclass")"
+    for value in "${statuses[@]}"; do
+      if value="$(background_status_numeric_value "$base" "$value")"; then
+        values+=("$value")
+      fi
+    done
+    if [ ${#values[@]} -gt 0 ]; then
+      joined=$(IFS=,; printf '%s' "${values[*]}")
+      printf '%s NOT IN (%s)' "$column" "$joined"
+      return 0
+    fi
+    expr="$(background_status_case_expression "$regclass" "$column")"
+    quoted="$(background_quote_list "${statuses[@]}")"
+    if [ -n "$expr" ] && [ -n "$quoted" ]; then
+      printf '%s NOT IN (%s)' "$expr" "$quoted"
+      return 0
+    fi
+    quoted="$(background_quote_list "${statuses[@]}")"
+    printf '%s::text NOT IN (%s)' "$column" "$quoted"
+    return 0
+  fi
+
+  quoted="$(background_quote_list "${statuses[@]}")"
+  printf '%s NOT IN (%s)' "$column" "$quoted"
+}
+
+
 background_print_pending_task() {
   local indent="$1" pending_output pending_rc
 
@@ -217,10 +418,14 @@ background_print_sidekiq_logs() {
 }
 
 background_print_batched_migrations() {
-  local indent="$1" table_rc query output
+  local indent="$1" table_rc query output status_expr status_condition job_status_expr
 
   if background_psql_table_exists 'public.batched_background_migrations'; then
-    query="SELECT id || ' | ' || job_class_name || ' | ' || table_name || ' | status=' || status || ' | processed=' || COALESCE(processed_tuple_count::text,'?') || '/' || COALESCE(total_tuple_count::text,'?') || ' | updated=' || COALESCE(updated_at::text,'-') FROM batched_background_migrations WHERE status NOT IN ('finished','finalizing') ORDER BY created_at LIMIT 10"
+    status_expr="$(background_status_case_expression 'public.batched_background_migrations' 'status')"
+    [ -z "$status_expr" ] && status_expr='status'
+    status_condition="$(background_status_filter_condition 'public.batched_background_migrations' 'status' 'finished' 'finalizing' 'finalized')"
+    [ -z "$status_condition" ] && status_condition="status NOT IN ('finished','finalizing','finalized')"
+    query="SELECT id || ' | ' || job_class_name || ' | ' || table_name || ' | status=' || ${status_expr} || ' | processed=' || COALESCE(processed_tuple_count::text,'?') || '/' || COALESCE(total_tuple_count::text,'?') || ' | updated=' || COALESCE(updated_at::text,'-') FROM batched_background_migrations WHERE ${status_condition} ORDER BY created_at LIMIT 10"
     if background_psql "$query"; then
       output="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
       if [[ -n "${output//[[:space:]]/}" ]]; then
@@ -237,7 +442,9 @@ background_print_batched_migrations() {
     fi
 
     if background_psql_table_exists 'public.batched_background_migration_jobs'; then
-      query="SELECT status || ': ' || COUNT(*) FROM batched_background_migration_jobs GROUP BY status ORDER BY status"
+      job_status_expr="$(background_status_case_expression 'public.batched_background_migration_jobs' 'status')"
+      [ -z "$job_status_expr" ] && job_status_expr='status'
+      query="SELECT ${job_status_expr} || ': ' || COUNT(*) FROM batched_background_migration_jobs GROUP BY ${job_status_expr} ORDER BY ${job_status_expr}"
       if background_psql "$query"; then
         output="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
         if [[ -n "${output//[[:space:]]/}" ]]; then
@@ -276,15 +483,20 @@ background_print_batched_migrations() {
   fi
 }
 
+
 background_print_legacy_jobs() {
-  local indent="$1" table_rc query output
+  local indent="$1" table_rc query output status_expr status_condition
 
   if background_psql_table_exists 'public.background_migration_jobs'; then
-    query="SELECT id || ' | ' || class_name || ' | status=' || status || ' | attempts=' || COALESCE(attempts::text,'0') || ' | updated=' || COALESCE(updated_at::text,'-') FROM background_migration_jobs WHERE status <> 'succeeded' ORDER BY updated_at DESC LIMIT 10"
+    status_expr="$(background_status_case_expression 'public.background_migration_jobs' 'status')"
+    [ -z "$status_expr" ] && status_expr='status'
+    status_condition="$(background_status_filter_condition 'public.background_migration_jobs' 'status' 'succeeded' 'finished')"
+    [ -z "$status_condition" ] && status_condition="status NOT IN ('succeeded','finished')"
+    query="SELECT id || ' | ' || class_name || ' | status=' || ${status_expr} || ' | attempts=' || COALESCE(attempts::text,'0') || ' | updated=' || COALESCE(updated_at::text,'-') FROM background_migration_jobs WHERE ${status_condition} ORDER BY updated_at DESC LIMIT 10"
     if background_psql "$query"; then
       output="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
-  if [[ -n "${output//[[:space:]]/}" ]]; then
-        log "${indent}- Записи background_migration_jobs со статусом <> succeeded:"
+      if [[ -n "${output//[[:space:]]/}" ]]; then
+        log "${indent}- Записи background_migration_jobs со статусами <> succeeded/finished:"
         printf '%s\n' "$output" | indent_with_prefix "${indent}  "
       else
         log "${indent}- background_migration_jobs: незавершённых записей нет"
@@ -308,11 +520,14 @@ background_print_legacy_jobs() {
   fi
 }
 
+
 background_print_manual_hints() {
-  local indent="$1"
+  local indent="$1" status_condition
+  status_condition="$(background_status_filter_condition 'public.batched_background_migrations' 'status' 'finished' 'finalizing' 'finalized')"
+  [ -z "$status_condition" ] && status_condition="status NOT IN ('finished','finalizing','finalized')"
   log "${indent}- Подсказки по ручной диагностике:"
   log "${indent}  * Проверить sidekiq: docker exec -it ${CONTAINER_NAME} gitlab-ctl tail sidekiq"
-  log "${indent}  * Проверить фоновые миграции: docker exec -it ${CONTAINER_NAME} gitlab-psql -d gitlabhq_production -c \"SELECT * FROM batched_background_migrations WHERE status <> 'finished';\""
+  log "${indent}  * Проверить фоновые миграции: docker exec -it ${CONTAINER_NAME} gitlab-psql -d gitlabhq_production -c \"SELECT * FROM batched_background_migrations WHERE ${status_condition};\""
 }
 
 background_migrations_extra_diagnostics() {
@@ -389,14 +604,18 @@ background_collect_pending() {
   BACKGROUND_PENDING_LEGACY=0
   BACKGROUND_PENDING_LEGACY_STATUSES=""
 
-  local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" legacy_raw="" detail_line=""
+  local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" legacy_raw="" detail_line="" batched_status_expr="" batched_condition="" batched_job_status_expr="" batched_job_condition="" legacy_status_expr="" legacy_condition=""
   local batched_table_check="SELECT to_regclass('public.batched_background_migrations')::text"
   local batched_jobs_table_check="SELECT to_regclass('public.batched_background_migration_jobs')::text"
   local legacy_table_check="SELECT to_regclass('public.background_migration_jobs')::text"
   local -a detail_lines=()
 
   if background_psql_table_exists 'public.batched_background_migrations'; then
-    query="SELECT COUNT(*) FROM batched_background_migrations WHERE status <> 'finished'"
+    batched_status_expr="$(background_status_case_expression 'public.batched_background_migrations' 'status')"
+    [ -z "$batched_status_expr" ] && batched_status_expr='status'
+    batched_condition="$(background_status_filter_condition 'public.batched_background_migrations' 'status' 'finished' 'finalizing' 'finalized')"
+    [ -z "$batched_condition" ] && batched_condition="status NOT IN ('finished','finalizing','finalized')"
+    query="SELECT COUNT(*) FROM batched_background_migrations WHERE ${batched_condition}"
     if background_psql "$query"; then
       count_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
       trimmed="$(printf '%s' "$count_raw" | tr -d '[:space:]')"
@@ -404,7 +623,7 @@ background_collect_pending() {
         BACKGROUND_PENDING_BATCHED="$trimmed"
         if [ "$trimmed" -gt 0 ]; then
           total=$((total + trimmed))
-          query="SELECT status || '=' || COUNT(*) FROM batched_background_migrations WHERE status <> 'finished' GROUP BY status ORDER BY status"
+          query="SELECT ${batched_status_expr} || '=' || COUNT(*) FROM batched_background_migrations WHERE ${batched_condition} GROUP BY ${batched_status_expr} ORDER BY ${batched_status_expr}"
           if background_psql "$query"; then
             status_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
             BACKGROUND_PENDING_BATCHED_STATUSES="$(background_format_status_lines "$status_raw")"
@@ -418,7 +637,11 @@ background_collect_pending() {
             background_append_psql_error "batched_background_migrations" "$query"
           fi
           if background_psql_table_exists 'public.batched_background_migration_jobs'; then
-            query="SELECT status || '=' || COUNT(*) FROM batched_background_migration_jobs WHERE status <> 'finished' GROUP BY status ORDER BY status"
+            batched_job_status_expr="$(background_status_case_expression 'public.batched_background_migration_jobs' 'status')"
+            [ -z "$batched_job_status_expr" ] && batched_job_status_expr='status'
+            batched_job_condition="$(background_status_filter_condition 'public.batched_background_migration_jobs' 'status' 'finished' 'succeeded')"
+            [ -z "$batched_job_condition" ] && batched_job_condition="status NOT IN ('finished','succeeded')"
+            query="SELECT ${batched_job_status_expr} || '=' || COUNT(*) FROM batched_background_migration_jobs WHERE ${batched_job_condition} GROUP BY ${batched_job_status_expr} ORDER BY ${batched_job_status_expr}"
             if background_psql "$query"; then
               job_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
               BACKGROUND_PENDING_BATCHED_JOBS="$(background_format_status_lines "$job_raw")"
@@ -455,6 +678,7 @@ background_collect_pending() {
     fi
   fi
 
+
   if [ "$BACKGROUND_PENDING_BATCHED" -gt 0 ]; then
     detail_line="batched_background_migrations: ${BACKGROUND_PENDING_BATCHED}"
     if [ -n "$BACKGROUND_PENDING_BATCHED_STATUSES" ]; then
@@ -471,7 +695,11 @@ background_collect_pending() {
   fi
 
   if background_psql_table_exists 'public.background_migration_jobs'; then
-    query="SELECT COUNT(*) FROM background_migration_jobs WHERE status <> 'succeeded'"
+    legacy_status_expr="$(background_status_case_expression 'public.background_migration_jobs' 'status')"
+    [ -z "$legacy_status_expr" ] && legacy_status_expr='status'
+    legacy_condition="$(background_status_filter_condition 'public.background_migration_jobs' 'status' 'succeeded' 'finished')"
+    [ -z "$legacy_condition" ] && legacy_condition="status NOT IN ('succeeded','finished')"
+    query="SELECT COUNT(*) FROM background_migration_jobs WHERE ${legacy_condition}"
     if background_psql "$query"; then
       count_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
       trimmed="$(printf '%s' "$count_raw" | tr -d '[:space:]')"
@@ -479,7 +707,7 @@ background_collect_pending() {
         BACKGROUND_PENDING_LEGACY="$trimmed"
         if [ "$trimmed" -gt 0 ]; then
           total=$((total + trimmed))
-          query="SELECT status || '=' || COUNT(*) FROM background_migration_jobs WHERE status <> 'succeeded' GROUP BY status ORDER BY status"
+          query="SELECT ${legacy_status_expr} || '=' || COUNT(*) FROM background_migration_jobs WHERE ${legacy_condition} GROUP BY ${legacy_status_expr} ORDER BY ${legacy_status_expr}"
           if background_psql "$query"; then
             legacy_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
             BACKGROUND_PENDING_LEGACY_STATUSES="$(background_format_status_lines "$legacy_raw")"
@@ -502,6 +730,7 @@ background_collect_pending() {
       background_append_psql_error "background_migration_jobs" "$legacy_table_check"
     fi
   fi
+
 
   if [ "$BACKGROUND_PENDING_LEGACY" -gt 0 ]; then
     detail_line="background_migration_jobs: ${BACKGROUND_PENDING_LEGACY}"

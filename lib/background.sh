@@ -7,10 +7,78 @@ BACKGROUND_RAKE_TASKS_ERROR=""
 BACKGROUND_RAKE_TASKS_LOADED=0
 BACKGROUND_LAST_PSQL_OUTPUT=""
 BACKGROUND_LAST_PSQL_RC=0
+BACKGROUND_PENDING_TOTAL=0
+BACKGROUND_PENDING_DETAILS=""
+BACKGROUND_PENDING_ERROR_MSG=""
+BACKGROUND_PENDING_BLOCKED=0
+BACKGROUND_PENDING_BLOCKER_MSG=""
+BACKGROUND_PENDING_BATCHED=0
+BACKGROUND_PENDING_BATCHED_STATUSES=""
+BACKGROUND_PENDING_BATCHED_JOBS=""
+BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
+BACKGROUND_PENDING_LEGACY=0
+BACKGROUND_PENDING_LEGACY_STATUSES=""
 
 indent_with_prefix() {
   local prefix="${1:-      }"
   sed "s/^/${prefix}/"
+}
+ 
+background_normalize_lines() {
+  local data="$1"
+  printf '%s' "$data" | tr -d '\\r' | sed '/^[[:space:]]*$/d'
+}
+ 
+background_format_status_lines() {
+  local data
+  data="$(background_normalize_lines "$1")"
+  if [ -z "$data" ]; then
+    return 0
+  fi
+  printf '%s' "$data" | tr '\\n' ',' | sed 's/,$//' | sed 's/,/, /g'
+}
+ 
+background_sum_counts() {
+  local data
+  data="$(background_normalize_lines "$1")"
+  if [ -z "$data" ]; then
+    printf '0'
+    return 0
+  fi
+  printf '%s\n' "$data" | awk -F= 'BEGIN{sum=0} {if($2 ~ /^[0-9]+$/) {sum+=$2}} END{print sum}'
+}
+ 
+background_append_error_msg() {
+  local message="$1"
+  if [ -z "$message" ]; then
+    return
+  fi
+  if [ -z "$BACKGROUND_PENDING_ERROR_MSG" ]; then
+    BACKGROUND_PENDING_ERROR_MSG="$message"
+  else
+    BACKGROUND_PENDING_ERROR_MSG+=$'\n'"$message"
+  fi
+}
+background_append_blocker() {
+  local message="$1"
+  [ -z "$message" ] && return
+  BACKGROUND_PENDING_BLOCKED=1
+  if [ -z "$BACKGROUND_PENDING_BLOCKER_MSG" ]; then
+    BACKGROUND_PENDING_BLOCKER_MSG="$message"
+  else
+    BACKGROUND_PENDING_BLOCKER_MSG+=$'\n'"$message"
+  fi
+}
+ 
+background_append_psql_error() {
+  local context="$1" query="$2" rc output message
+  rc="${BACKGROUND_LAST_PSQL_RC:-unknown}"
+  output="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
+  message="${context}: запрос ${query} завершился с кодом ${rc}"
+  if [ -n "$output" ]; then
+    message="${message}"$'\n'"${output}"
+  fi
+  background_append_error_msg "$message"
 }
 
 background_load_rake_tasks() {
@@ -306,4 +374,253 @@ background_migrations_status_report() {
 
   background_migrations_extra_diagnostics "$indent"
   return $status_rc
+}
+
+background_collect_pending() {
+  BACKGROUND_PENDING_TOTAL=0
+  BACKGROUND_PENDING_DETAILS=""
+  BACKGROUND_PENDING_ERROR_MSG=""
+  BACKGROUND_PENDING_BLOCKED=0
+  BACKGROUND_PENDING_BLOCKER_MSG=""
+  BACKGROUND_PENDING_BATCHED=0
+  BACKGROUND_PENDING_BATCHED_STATUSES=""
+  BACKGROUND_PENDING_BATCHED_JOBS=""
+  BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
+  BACKGROUND_PENDING_LEGACY=0
+  BACKGROUND_PENDING_LEGACY_STATUSES=""
+
+  local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" legacy_raw="" detail_line=""
+  local batched_table_check="SELECT to_regclass('public.batched_background_migrations')::text"
+  local batched_jobs_table_check="SELECT to_regclass('public.batched_background_migration_jobs')::text"
+  local legacy_table_check="SELECT to_regclass('public.background_migration_jobs')::text"
+  local -a detail_lines=()
+
+  if background_psql_table_exists 'public.batched_background_migrations'; then
+    query="SELECT COUNT(*) FROM batched_background_migrations WHERE status <> 'finished'"
+    if background_psql "$query"; then
+      count_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+      trimmed="$(printf '%s' "$count_raw" | tr -d '[:space:]')"
+      if [[ "$trimmed" =~ ^[0-9]+$ ]]; then
+        BACKGROUND_PENDING_BATCHED="$trimmed"
+        if [ "$trimmed" -gt 0 ]; then
+          total=$((total + trimmed))
+          query="SELECT status || '=' || COUNT(*) FROM batched_background_migrations WHERE status <> 'finished' GROUP BY status ORDER BY status"
+          if background_psql "$query"; then
+            status_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
+            BACKGROUND_PENDING_BATCHED_STATUSES="$(background_format_status_lines "$status_raw")"
+            if [ -n "$status_raw" ] && printf '%s\n' "$status_raw" | grep -q '^failed='; then
+              background_append_blocker "batched_background_migrations: есть записи со статусом failed"
+            fi
+            if [ -n "$status_raw" ] && printf '%s\n' "$status_raw" | grep -q '^paused='; then
+              background_append_blocker "batched_background_migrations: есть записи со статусом paused"
+            fi
+          else
+            background_append_psql_error "batched_background_migrations" "$query"
+          fi
+          if background_psql_table_exists 'public.batched_background_migration_jobs'; then
+            query="SELECT status || '=' || COUNT(*) FROM batched_background_migration_jobs WHERE status <> 'finished' GROUP BY status ORDER BY status"
+            if background_psql "$query"; then
+              job_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
+              BACKGROUND_PENDING_BATCHED_JOBS="$(background_format_status_lines "$job_raw")"
+              job_total="$(background_sum_counts "$job_raw")"
+              job_total="$(printf '%s' "$job_total" | tr -d '[:space:]')"
+              if [[ "$job_total" =~ ^[0-9]+$ ]]; then
+                BACKGROUND_PENDING_BATCHED_JOBS_TOTAL="$job_total"
+              else
+                BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
+              fi
+              if [ -n "$job_raw" ] && printf '%s\n' "$job_raw" | grep -q '^failed='; then
+                background_append_blocker "batched_background_migration_jobs: есть задачи со статусом failed"
+              fi
+            else
+              background_append_psql_error "batched_background_migration_jobs" "$query"
+            fi
+          else
+            table_rc=$?
+            if [ "$table_rc" -eq 2 ]; then
+              background_append_psql_error "batched_background_migration_jobs" "$batched_jobs_table_check"
+            fi
+          fi
+        fi
+      else
+        background_append_error_msg "batched_background_migrations: неожиданный ответ COUNT(*) — ${count_raw}"
+      fi
+    else
+      background_append_psql_error "batched_background_migrations" "$query"
+    fi
+  else
+    table_rc=$?
+    if [ "$table_rc" -eq 2 ]; then
+      background_append_psql_error "batched_background_migrations" "$batched_table_check"
+    fi
+  fi
+
+  if [ "$BACKGROUND_PENDING_BATCHED" -gt 0 ]; then
+    detail_line="batched_background_migrations: ${BACKGROUND_PENDING_BATCHED}"
+    if [ -n "$BACKGROUND_PENDING_BATCHED_STATUSES" ]; then
+      detail_line+=" (${BACKGROUND_PENDING_BATCHED_STATUSES})"
+    fi
+    detail_lines+=("$detail_line")
+    if [ "${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL:-0}" -gt 0 ]; then
+      detail_line="batched_background_migration_jobs: ${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL}"
+      if [ -n "$BACKGROUND_PENDING_BATCHED_JOBS" ]; then
+        detail_line+=" (${BACKGROUND_PENDING_BATCHED_JOBS})"
+      fi
+      detail_lines+=("$detail_line")
+    fi
+  fi
+
+  if background_psql_table_exists 'public.background_migration_jobs'; then
+    query="SELECT COUNT(*) FROM background_migration_jobs WHERE status <> 'succeeded'"
+    if background_psql "$query"; then
+      count_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+      trimmed="$(printf '%s' "$count_raw" | tr -d '[:space:]')"
+      if [[ "$trimmed" =~ ^[0-9]+$ ]]; then
+        BACKGROUND_PENDING_LEGACY="$trimmed"
+        if [ "$trimmed" -gt 0 ]; then
+          total=$((total + trimmed))
+          query="SELECT status || '=' || COUNT(*) FROM background_migration_jobs WHERE status <> 'succeeded' GROUP BY status ORDER BY status"
+          if background_psql "$query"; then
+            legacy_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
+            BACKGROUND_PENDING_LEGACY_STATUSES="$(background_format_status_lines "$legacy_raw")"
+            if [ -n "$legacy_raw" ] && printf '%s\n' "$legacy_raw" | grep -Eq '^(failed|errored)='; then
+              background_append_blocker "background_migration_jobs: есть записи со статусами failed/errored"
+            fi
+          else
+            background_append_psql_error "background_migration_jobs" "$query"
+          fi
+        fi
+      else
+        background_append_error_msg "background_migration_jobs: неожиданный ответ COUNT(*) — ${count_raw}"
+      fi
+    else
+      background_append_psql_error "background_migration_jobs" "$query"
+    fi
+  else
+    table_rc=$?
+    if [ "$table_rc" -eq 2 ]; then
+      background_append_psql_error "background_migration_jobs" "$legacy_table_check"
+    fi
+  fi
+
+  if [ "$BACKGROUND_PENDING_LEGACY" -gt 0 ]; then
+    detail_line="background_migration_jobs: ${BACKGROUND_PENDING_LEGACY}"
+    if [ -n "$BACKGROUND_PENDING_LEGACY_STATUSES" ]; then
+      detail_line+=" (${BACKGROUND_PENDING_LEGACY_STATUSES})"
+    fi
+    detail_lines+=("$detail_line")
+  fi
+
+  BACKGROUND_PENDING_TOTAL=$total
+  if [ ${#detail_lines[@]} -gt 0 ]; then
+    BACKGROUND_PENDING_DETAILS=$(printf '%s\n' "${detail_lines[@]}")
+  else
+    BACKGROUND_PENDING_DETAILS=""
+  fi
+
+  if [ -n "$BACKGROUND_PENDING_ERROR_MSG" ]; then
+    return 2
+  fi
+
+  if [ "$total" -gt 0 ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+background_wait_for_completion() {
+  local context="$1"
+  local interval="${BACKGROUND_WAIT_INTERVAL:-60}"
+  local report_every="${BACKGROUND_WAIT_REPORT_EVERY:-5}"
+  local progress_interval="${BACKGROUND_WAIT_PROGRESS_INTERVAL:-300}"
+  local start_ts now waited attempt=0 report_counter=0 last_signature="" last_log_ts=0 signature="" should_log=0 last_total=-1
+  local message="" total="0" context_note=""
+
+  if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -le 0 ]; then
+    interval=60
+  fi
+  if ! [[ "$report_every" =~ ^[0-9]+$ ]]; then
+    report_every=5
+  fi
+  if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || [ "$progress_interval" -le 0 ]; then
+    progress_interval=$((interval * 5))
+  fi
+  if [ "$progress_interval" -lt "$interval" ]; then
+    progress_interval=$interval
+  fi
+  if [ -n "$context" ]; then
+    context_note=" (контекст: ${context})"
+  fi
+
+  log "[>] Проверка фоновых миграций${context:+ (${context})}..."
+  start_ts=$(date +%s)
+
+  while true; do
+    background_collect_pending
+    case $? in
+      0)
+        if [ "$attempt" -gt 0 ]; then
+          waited=$(( $(date +%s) - start_ts ))
+          ok "Фоновые миграции завершены${context:+ (${context})} (ожидание $(format_duration "$waited"))"
+        else
+          ok "Фоновые миграции уже завершены${context:+ (${context})}"
+        fi
+        return 0
+        ;;
+      1)
+        if [ "${BACKGROUND_PENDING_BLOCKED:-0}" -eq 1 ]; then
+          err "Фоновые миграции заблокированы и требуют вмешательства${context_note}"
+          if [ -n "$BACKGROUND_PENDING_BLOCKER_MSG" ]; then
+            printf '%s\n' "$BACKGROUND_PENDING_BLOCKER_MSG" | indent_with_prefix "    "
+          fi
+          if [ -n "$BACKGROUND_PENDING_DETAILS" ]; then
+            printf '%s\n' "$BACKGROUND_PENDING_DETAILS" | indent_with_prefix "    "
+          fi
+          background_migrations_status_report "    " || true
+          return 1
+        fi
+        now=$(date +%s)
+        waited=$((now - start_ts))
+        total="${BACKGROUND_PENDING_TOTAL:-0}"
+        signature="${total}|${BACKGROUND_PENDING_DETAILS}"
+        should_log=0
+        if [ "$last_signature" != "$signature" ] || [ "$last_log_ts" -eq 0 ]; then
+          should_log=1
+        elif [ $((now - last_log_ts)) -ge "$progress_interval" ]; then
+          should_log=1
+        fi
+        if [ "$should_log" -eq 1 ]; then
+          message="[wait] Фоновые миграции ещё выполняются — всего ${total}; ожидание $(format_duration "$waited")${context_note}"
+          if [ "$last_total" -ge 0 ] && [ "$total" -lt "$last_total" ]; then
+            message+=" (прогресс: ${last_total} → ${total})"
+          elif [ "$last_total" -eq "$total" ] && [ "$total" -gt 0 ] && [ "$last_log_ts" -ne 0 ]; then
+            message+=" (без изменений)"
+          fi
+          log "$message"
+          if [ -n "$BACKGROUND_PENDING_DETAILS" ]; then
+            printf '%s\n' "$BACKGROUND_PENDING_DETAILS" | indent_with_prefix "        "
+          fi
+          report_counter=$((report_counter + 1))
+          if [ "$report_counter" -eq 1 ] || { [ "$report_every" -gt 0 ] && [ $((report_counter % report_every)) -eq 0 ]; }; then
+            background_migrations_status_report "    " || true
+          fi
+          last_signature="$signature"
+          last_log_ts=$now
+          last_total=$total
+        fi
+        attempt=$((attempt + 1))
+        sleep "$interval"
+        ;;
+      2)
+        err "Не удалось получить статус фоновых миграций${context_note}"
+        if [ -n "$BACKGROUND_PENDING_ERROR_MSG" ]; then
+          log "  Подробности:"
+          printf '%s\n' "$BACKGROUND_PENDING_ERROR_MSG" | indent_with_prefix "    "
+        fi
+        background_migrations_extra_diagnostics "    " || true
+        return 1
+        ;;
+    esac
+  done
 }

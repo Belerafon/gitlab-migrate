@@ -117,6 +117,11 @@ main() {
     exit 0
   fi
 
+  if ! background_wait_for_completion "перед построением лестницы апгрейдов"; then
+    err "Фоновые миграции не завершены — прерываю выполнение"
+    exit 1
+  fi
+
   log "[>] Формирую «лестницу» апгрейдов…"
   mapfile -t stops < <(compute_stops)
   echo "  → ${stops[*]} (будут разрешены до latest patch)" >&2

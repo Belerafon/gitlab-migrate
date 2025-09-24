@@ -673,6 +673,66 @@ print_http_failure_diagnostics() {
 
   local script
   script=$(cat <<'EOS'
+tail_lines=${HTTP_LOG_TAIL_LINES:-40}
+
+filter_log_noise() {
+  local file="$1"
+
+  case "$file" in
+    /var/log/gitlab/gitlab-workhorse/current)
+      awk '
+        /"level":"info"/ {
+          if (/"msg":"Send static file"/) { next }
+          if (/"msg":"access"/) {
+            if (/"status":[45][0-9][0-9]/) { print; next }
+            next
+          }
+          if (/"msg":"success"/ && /"subsystem":"imageresizer"/) { next }
+        }
+        { print }
+      '
+      ;;
+    /var/log/gitlab/puma/puma_stdout.log)
+      awk '!/PumaWorkerKiller: Consuming/'
+      ;;
+    /var/log/gitlab/gitlab-rails/production.log)
+      awk '!/^Creating scope / && !/^Raven [0-9.]+ configured not to capture errors/'
+      ;;
+    *)
+      cat
+      ;;
+  esac
+}
+
+print_log_tail() {
+  local file="$1"
+  local raw filtered raw_lines
+
+  if [ ! -f "$file" ]; then
+    return
+  fi
+
+  if command -v tai64nlocal >/dev/null 2>&1 && [ "${file##*/}" = "current" ]; then
+    raw="$(tail -n "$tail_lines" "$file" | tai64nlocal)"
+  else
+    raw="$(tail -n "$tail_lines" "$file")"
+  fi
+
+  if [ -z "$raw" ]; then
+    return
+  fi
+
+  filtered="$(printf '%s\n' "$raw" | filter_log_noise "$file")"
+
+  if [ -n "$filtered" ]; then
+    printf '%s\n' "$filtered"
+    return
+  fi
+
+  raw_lines=$(printf '%s\n' "$raw" | awk 'END{print NR}')
+  printf '[отфильтрованы %s строк(и) без значимых событий]\n' "$raw_lines"
+}
+
 for file in \
   /var/log/gitlab/gitlab-workhorse/current \
   /var/log/gitlab/nginx/current \
@@ -682,11 +742,7 @@ for file in \
   /var/log/gitlab/gitlab-rails/production.log; do
   if [ -f "$file" ]; then
     echo "----- $file -----"
-    if command -v tai64nlocal >/dev/null 2>&1 && [ "${file##*/}" = "current" ]; then
-      tail -n 40 "$file" | tai64nlocal
-    else
-      tail -n 40 "$file"
-    fi
+    print_log_tail "$file"
     echo
   fi
 done

@@ -1,20 +1,61 @@
 # lib/upgrade.sh
 # shellcheck shell=bash
+declare -a UPGRADE_SERIES_ORDER=()
+declare -A UPGRADE_SERIES_PATCH=()
+declare -A UPGRADE_SERIES_REQUIREMENT=()
+declare -A UPGRADE_SERIES_FLAGS=()
+declare -A UPGRADE_SERIES_NOTES=()
+declare -a UPGRADE_SKIPPED_OPTIONALS=()
+
+register_upgrade_series() {
+  local series="$1" patch="$2" requirement="$3" flags="$4" note="$5"
+  UPGRADE_SERIES_ORDER+=("$series")
+  UPGRADE_SERIES_PATCH["$series"]="$patch"
+  UPGRADE_SERIES_REQUIREMENT["$series"]="${requirement:-required}"
+  UPGRADE_SERIES_FLAGS["$series"]="$flags"
+  UPGRADE_SERIES_NOTES["$series"]="$note"
+}
+
+while IFS='|' read -r series patch requirement flags note; do
+  [[ -z "$series" ]] && continue
+  [[ "$series" = \#* ]] && continue
+  register_upgrade_series "$series" "$patch" "$requirement" "$flags" "$note"
+done <<'EOF'
+# series|patch|requirement|flags|note
+13.0|13.0.14-ce.0|required||Финальный патч ветки 13.0 перед переходом на 13.1
+13.1|13.1.11-ce.0|required||Обязательная остановка GitLab 13 перед 13.8
+13.8|13.8.8-ce.0|required||Обязательная остановка GitLab 13 перед 13.12
+13.12|13.12.15-ce.0|required||Последний релиз 13.x перед переходом на 14.x
+14.0|14.0.12-ce.0|required||Старт ветки 14.x с исправлениями миграций
+14.3|14.3.6-ce.0|required||Рекомендуемая остановка 14.3 для безопасных миграций БД
+14.9|14.9.5-ce.0|required||Обязательный стоп 14.9 перед финальным 14.10
+14.10|14.10.5-ce.0|required||Финальный релиз 14.x перед 15.x
+15.0|15.0.5-ce.0|required||Первый релиз 15.x с исправлениями миграций
+15.1|15.1.6-ce.0|conditional|multi-web|Нужен для инстансов с несколькими web-нодами
+15.4|15.4.6-ce.0|required||Обязательный стоп 15.4 перед 15.11
+15.11|15.11.13-ce.0|required||Последний релиз 15.x перед 16.x
+16.0|16.0.10-ce.0|conditional|large-users,large-pipeline-history|Рекомендуется для крупных инстансов и больших историй переменных пайплайнов
+16.1|16.1.8-ce.0|conditional|npm-packages|Рекомендуется при использовании npm в registry
+16.2|16.2.11-ce.0|conditional|pipeline-variables|Нужен для инстансов с большой историей переменных пайплайна
+16.3|16.3.9-ce.0|required||Обязательный стоп 16.3
+16.7|16.7.10-ce.0|required||Обязательный стоп 16.7
+16.11|16.11.10-ce.0|required||Последний релиз 16.x перед 17.x и переходом на PostgreSQL 14
+17.0|17.0.7-ce.0|required||Начальный релиз ветки 17.x с исправлениями миграций
+17.1|17.1.8-ce.0|conditional|large-ci-pipeline-messages|Нужен для инстансов с крупной таблицей ci_pipeline_messages
+17.3|17.3.7-ce.0|required||Обязательный стоп 17.3
+17.5|17.5.5-ce.0|required||Обязательный стоп 17.5
+17.8|17.8.7-ce.0|required||Обязательный стоп 17.8
+17.11|17.11.7-ce.0|required||Финальный релиз 17.x на момент подготовки
+EOF
+
 # Function to get the latest patch version for a given series
 latest_patch_tag() {
-  local series="$1"
-  # Hardcoded mapping for known series to their latest patch versions
-  case "$series" in
-    "13.12") echo "13.12.15-ce.0" ;;
-    "14.0")  echo "14.0.12-ce.0" ;;
-    "14.10") echo "14.10.5-ce.0" ;;
-    "15.0")  echo "15.0.5-ce.0" ;;
-    "15.11") echo "15.11.13-ce.0" ;;
-    "16.0")  echo "16.0.10-ce.0" ;;
-    "16.11") echo "16.11.3-ce.0" ;;
-    "17")    echo "17.0.0-ce.0" ;;
-    *)       echo "$series" ;; # fallback to input if not found
-  esac
+  local series="$1" patch="${UPGRADE_SERIES_PATCH[$series]:-}" 
+  if [ -n "$patch" ]; then
+    echo "$patch"
+  else
+    echo "$series"
+  fi
 }
 
 # Убирает суффиксы вроде «-ce.0» и переводит версию в компактный вид.
@@ -49,15 +90,105 @@ version_ge() {
   [[ "$highest" = "$left" ]]
 }
 
+upgrade_stop_requirement() {
+  local series="$1"
+  printf '%s' "${UPGRADE_SERIES_REQUIREMENT[$series]:-required}"
+}
+
+upgrade_stop_flags() {
+  local series="$1"
+  printf '%s' "${UPGRADE_SERIES_FLAGS[$series]:-}"
+}
+
+upgrade_stop_note() {
+  local series="$1"
+  printf '%s' "${UPGRADE_SERIES_NOTES[$series]:-}"
+}
+
+describe_upgrade_stop() {
+  local series="$1" patch requirement flags note status extras_join=""
+  local -a extras=()
+  patch="$(latest_patch_tag "$series")"
+  requirement="$(upgrade_stop_requirement "$series")"
+  flags="$(upgrade_stop_flags "$series")"
+  note="$(upgrade_stop_note "$series")"
+
+  case "$requirement" in
+    required) status="обязательная" ;;
+    conditional) status="условная" ;;
+    *) status="$requirement" ;;
+  esac
+
+  if [ -n "$flags" ]; then
+    extras+=("условия: $flags")
+  fi
+  if [ -n "$note" ]; then
+    extras+=("$note")
+  fi
+
+  if [ "${#extras[@]}" -gt 0 ]; then
+    extras_join=$(printf '%s; ' "${extras[@]}")
+    extras_join="${extras_join%; }"
+    printf '%s -> %s (%s; %s)' "$series" "$patch" "$status" "$extras_join"
+  else
+    printf '%s -> %s (%s)' "$series" "$patch" "$status"
+  fi
+}
+
+should_include_stop() {
+  local series="$1" requirement="$2"
+  local include_optional major list
+
+  major="${series%%.*}"
+  if [[ "$series" == "$major" ]]; then
+    major="$series"
+  fi
+
+  if [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 17 ] && [ "${DO_TARGET_17:-no}" != "yes" ]; then
+    return 1
+  fi
+
+  if [ "$requirement" != "conditional" ]; then
+    return 0
+  fi
+
+  include_optional="${INCLUDE_OPTIONAL_STOPS:-yes}"
+  case "$include_optional" in
+    yes|true|1|auto|'') return 0 ;;
+    no|false|0) return 1 ;;
+    list)
+      list=",${OPTIONAL_STOP_LIST:-},"
+      if [[ "$list" == *",${series},"* ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      warn "Неизвестное значение INCLUDE_OPTIONAL_STOPS='${include_optional}' — использую включение условных остановок"
+      return 0
+      ;;
+  esac
+}
+
 compute_stops() {
-  echo "13.12"
-  echo "14.0"
-  echo "14.10"
-  echo "15.0"
-  echo "15.11"
-  echo "16.0"
-  echo "16.11"
-  [ "$DO_TARGET_17" = "yes" ] && echo "17"
+  local series requirement
+  UPGRADE_SKIPPED_OPTIONALS=()
+
+  for series in "${UPGRADE_SERIES_ORDER[@]}"; do
+    requirement="$(upgrade_stop_requirement "$series")"
+
+    if should_include_stop "$series" "$requirement"; then
+      echo "$series"
+    else
+      if [ "$requirement" = "conditional" ]; then
+        UPGRADE_SKIPPED_OPTIONALS+=("$series")
+      fi
+    fi
+  done
+}
+
+get_skipped_optional_stops() {
+  printf '%s\n' "${UPGRADE_SKIPPED_OPTIONALS[@]}"
 }
 
 format_bytes_human() {
@@ -256,12 +387,28 @@ ensure_postgres_at_least() {
 }
 
 upgrade_to_series() {
-  local series="$1" target required_pg=""
-  case "$series" in
-    "14.0") required_pg=12 ;;
-    "15.11") required_pg=13 ;;
-    "16.11") required_pg=14 ;;
-    "17") required_pg=15 ;;
+  local series="$1" target required_pg="" major
+  major="${series%%.*}"
+
+  case "$major" in
+    14)
+      if [ "$series" = "14.0" ]; then
+        required_pg=12
+      fi
+      ;;
+    15)
+      if [ "$series" = "15.11" ]; then
+        required_pg=13
+      fi
+      ;;
+    16)
+      if [ "$series" = "16.11" ]; then
+        required_pg=14
+      fi
+      ;;
+    17)
+      required_pg=15
+      ;;
   esac
   if [[ -n "$required_pg" ]]; then
     ensure_postgres_at_least "$required_pg" "$series"

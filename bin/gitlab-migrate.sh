@@ -124,7 +124,22 @@ main() {
 
   log "[>] Формирую «лестницу» апгрейдов…"
   mapfile -t stops < <(compute_stops)
-  echo "  → ${stops[*]} (будут разрешены до latest patch)" >&2
+  log "  Запланированные остановки (серия → патч):"
+  local stop_metadata
+  for s in "${stops[@]}"; do
+    stop_metadata="$(describe_upgrade_stop "$s")"
+    log "    - ${stop_metadata}"
+  done
+
+  local -a skipped_optionals=()
+  mapfile -t skipped_optionals < <(get_skipped_optional_stops)
+  if [ "${#skipped_optionals[@]}" -gt 0 ]; then
+    warn "Условные остановки, пропущенные согласно INCLUDE_OPTIONAL_STOPS='${INCLUDE_OPTIONAL_STOPS:-yes}':"
+    for s in "${skipped_optionals[@]}"; do
+      stop_metadata="$(describe_upgrade_stop "$s")"
+      log "      * ${stop_metadata}"
+    done
+  fi
 
   local cur_ver_raw cur_ver target_tag target_version s
   for s in "${stops[@]}"; do

@@ -542,12 +542,100 @@ verify_restore_success() {
   fi
 
   log "[>] Проверка миграций после восстановления…"
-  local pending_count
-  pending_count=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null | grep -cE '^\s*down' || true)
-  if [ "$pending_count" -gt 0 ]; then
-    warn "Найдены незапущенные миграции: $pending_count"
+  local rake_available=0 need_status_check=1 pending_warned=0
+  local abort_output="" abort_rc=0 status_output="" status_rc=0 pending_count=0 preview_count=0
+
+  if gitlab_rake_available; then
+    rake_available=1
   else
-    ok "Все миграции применены"
+    need_status_check=0
+    warn "Не удалось проверить миграции: ${GITLAB_RAKE_ERROR:-Команда gitlab-rake недоступна}"
+  fi
+
+  if [ "$rake_available" -eq 1 ]; then
+    if background_rake_task_exists 'gitlab:db:abort_if_pending_migrations'; then
+      if abort_output=$(gitlab_rake gitlab:db:abort_if_pending_migrations 2>&1); then
+        ok "Все миграции применены"
+        need_status_check=0
+      else
+        abort_rc=$?
+        pending_warned=1
+        warn "Найдены незавершённые миграции (gitlab:db:abort_if_pending_migrations завершился с кодом ${abort_rc})"
+        if [ -n "${abort_output//[[:space:]]/}" ]; then
+          log "    - Вывод gitlab:db:abort_if_pending_migrations:"
+          printf '%s\n' "$abort_output" | indent_with_prefix "        "
+        fi
+      fi
+    else
+      if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ] && [ -n "${BACKGROUND_RAKE_TASKS_ERROR:-}" ]; then
+        warn "Не удалось получить список rake-задач (gitlab-rake -T завершился с кодом ${BACKGROUND_RAKE_TASKS_RC})"
+        printf '%s\n' "${BACKGROUND_RAKE_TASKS_ERROR}" | indent_with_prefix "    "
+      else
+        log "    - Задача gitlab:db:abort_if_pending_migrations недоступна в этой версии GitLab"
+      fi
+    fi
+  fi
+
+  if [ "$need_status_check" -eq 1 ] && [ "$rake_available" -eq 1 ]; then
+    if status_output=$(gitlab_rake db:migrate:status 2>&1); then
+      status_rc=0
+    else
+      status_rc=$?
+    fi
+
+    if [ "$status_rc" -eq 0 ]; then
+      pending_count=$(printf '%s\n' "$status_output" | awk '/^[[:space:]]*down/ {count++} END {print count+0}')
+      if [ "$pending_count" -gt 0 ]; then
+        if [ "$pending_warned" -eq 0 ]; then
+          warn "Найдены незапущенные миграции: ${pending_count}"
+          pending_warned=1
+        else
+          log "    - Незавершённых миграций: ${pending_count}"
+        fi
+        preview_count=$pending_count
+        if [ "$preview_count" -gt 10 ]; then
+          preview_count=10
+        fi
+        if [ "$preview_count" -gt 0 ]; then
+          log "    - Незавершённые миграции (первые ${preview_count}):"
+          printf '%s\n' "$status_output" |
+            awk '
+              BEGIN { db="" }
+              /^database:/ {
+                db=$0
+                sub(/^[[:space:]]+/, "", db)
+                next
+              }
+              /^[[:space:]]*down/ {
+                line=$0
+                sub(/^[[:space:]]+/, "", line)
+                if (db != "") {
+                  printf "%s -> %s\n", db, line
+                } else {
+                  printf "%s\n", line
+                }
+              }
+            ' |
+            head -n "$preview_count" |
+            indent_with_prefix "        "
+          if [ "$pending_count" -gt "$preview_count" ]; then
+            log "        … и ещё $((pending_count - preview_count)) миграций (см. полный вывод db:migrate:status)"
+          fi
+        fi
+      else
+        if [ "$pending_warned" -eq 1 ]; then
+          log "    - db:migrate:status не показал миграций со статусом down"
+        else
+          ok "Все миграции применены"
+        fi
+      fi
+    else
+      warn "Не удалось получить статус миграций (db:migrate:status завершился с кодом ${status_rc})"
+      if [ -n "${status_output//[[:space:]]/}" ]; then
+        log "    - Вывод db:migrate:status:"
+        printf '%s\n' "$status_output" | indent_with_prefix "        "
+      fi
+    fi
   fi
 
   log "[>] Проверка состояния базы данных…"

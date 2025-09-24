@@ -279,7 +279,7 @@ upgrade_to_series() {
 
     log "[>] Проверка миграций схемы:"
     local ms_output up_count down_count
-    ms_output=$(dexec 'gitlab-rake db:migrate:status' 2>/dev/null || true)
+    ms_output=$(gitlab_rake db:migrate:status 2>/dev/null || true)
     up_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*up' || true)
     down_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*down' || true)
 

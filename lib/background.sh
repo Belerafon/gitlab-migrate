@@ -242,14 +242,8 @@ background_status_numeric_value() {
     background_migration_jobs:pending)
       printf '0'
       ;;
-    background_migration_jobs:running)
-      printf '1'
-      ;;
-    background_migration_jobs:failed|background_migration_jobs:errored)
-      printf '2'
-      ;;
     background_migration_jobs:finished|background_migration_jobs:succeeded)
-      printf '3'
+      printf '1'
       ;;
     *)
       return 1
@@ -309,9 +303,7 @@ background_status_case_expression() {
     background_migration_jobs)
       expr="CASE ${column}"
       expr+=" WHEN 0 THEN 'pending'"
-      expr+=" WHEN 1 THEN 'running'"
-      expr+=" WHEN 2 THEN 'failed'"
-      expr+=" WHEN 3 THEN 'succeeded'"
+      expr+=" WHEN 1 THEN 'succeeded'"
       expr+=" ELSE ${column}::text END"
       ;;
     *)

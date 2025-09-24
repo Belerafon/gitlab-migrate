@@ -13,11 +13,8 @@ BACKGROUND_PENDING_ERROR_MSG=""
 BACKGROUND_PENDING_BLOCKED=0
 BACKGROUND_PENDING_BLOCKER_MSG=""
 BACKGROUND_PENDING_BATCHED=0
-BACKGROUND_PENDING_BATCHED_STATUSES=""
-BACKGROUND_PENDING_BATCHED_JOBS=""
 BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
 BACKGROUND_PENDING_LEGACY=0
-BACKGROUND_PENDING_LEGACY_STATUSES=""
 
 indent_with_prefix() {
   local prefix="${1:-      }"
@@ -29,15 +26,6 @@ background_normalize_lines() {
   printf '%s' "$data" | tr -d '\\r' | sed '/^[[:space:]]*$/d'
 }
  
-background_format_status_lines() {
-  local data
-  data="$(background_normalize_lines "$1")"
-  if [ -z "$data" ]; then
-    return 0
-  fi
-  printf '%s' "$data" | tr '\\n' ',' | sed 's/,$//' | sed 's/,/, /g'
-}
- 
 background_sum_counts() {
   local data
   data="$(background_normalize_lines "$1")"
@@ -46,6 +34,26 @@ background_sum_counts() {
     return 0
   fi
   printf '%s\n' "$data" | awk -F= 'BEGIN{sum=0} {if($2 ~ /^[0-9]+$/) {sum+=$2}} END{print sum}'
+}
+
+background_format_status_bullet_lines() {
+  local data indent bullet line result=""
+
+  data="$(background_normalize_lines "$1")"
+  indent="${2:-    }"
+  bullet="${3:-- }"
+
+  if [ -z "$data" ]; then
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    result+="${indent}${bullet}${line}"$'\n'
+  done <<< "$data"
+
+  printf '%s' "${result%$'\n'}"
+  return 0
 }
  
 background_append_error_msg() {
@@ -598,13 +606,14 @@ background_collect_pending() {
   BACKGROUND_PENDING_BLOCKED=0
   BACKGROUND_PENDING_BLOCKER_MSG=""
   BACKGROUND_PENDING_BATCHED=0
-  BACKGROUND_PENDING_BATCHED_STATUSES=""
-  BACKGROUND_PENDING_BATCHED_JOBS=""
   BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
   BACKGROUND_PENDING_LEGACY=0
-  BACKGROUND_PENDING_LEGACY_STATUSES=""
 
-  local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" legacy_raw="" detail_line="" batched_status_expr="" batched_condition="" batched_job_status_expr="" batched_job_condition="" legacy_status_expr="" legacy_condition=""
+  local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" detail_line=""
+  local batched_status_expr="" batched_condition="" batched_job_status_expr="" batched_job_condition=""
+  local legacy_status_expr="" legacy_condition=""
+  local batched_status_raw="" batched_jobs_status_raw="" legacy_status_raw=""
+  local formatted=""
   local batched_table_check="SELECT to_regclass('public.batched_background_migrations')::text"
   local batched_jobs_table_check="SELECT to_regclass('public.batched_background_migration_jobs')::text"
   local legacy_table_check="SELECT to_regclass('public.background_migration_jobs')::text"
@@ -626,7 +635,7 @@ background_collect_pending() {
           query="SELECT ${batched_status_expr} || '=' || COUNT(*) FROM batched_background_migrations WHERE ${batched_condition} GROUP BY ${batched_status_expr} ORDER BY ${batched_status_expr}"
           if background_psql "$query"; then
             status_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
-            BACKGROUND_PENDING_BATCHED_STATUSES="$(background_format_status_lines "$status_raw")"
+            batched_status_raw="$status_raw"
             if [ -n "$status_raw" ] && printf '%s\n' "$status_raw" | grep -q '^failed='; then
               background_append_blocker "batched_background_migrations: есть записи со статусом failed"
             fi
@@ -644,7 +653,7 @@ background_collect_pending() {
             query="SELECT ${batched_job_status_expr} || '=' || COUNT(*) FROM batched_background_migration_jobs WHERE ${batched_job_condition} GROUP BY ${batched_job_status_expr} ORDER BY ${batched_job_status_expr}"
             if background_psql "$query"; then
               job_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
-              BACKGROUND_PENDING_BATCHED_JOBS="$(background_format_status_lines "$job_raw")"
+              batched_jobs_status_raw="$job_raw"
               job_total="$(background_sum_counts "$job_raw")"
               job_total="$(printf '%s' "$job_total" | tr -d '[:space:]')"
               if [[ "$job_total" =~ ^[0-9]+$ ]]; then
@@ -680,18 +689,23 @@ background_collect_pending() {
 
 
   if [ "$BACKGROUND_PENDING_BATCHED" -gt 0 ]; then
-    detail_line="batched_background_migrations: ${BACKGROUND_PENDING_BATCHED}"
-    if [ -n "$BACKGROUND_PENDING_BATCHED_STATUSES" ]; then
-      detail_line+=" (${BACKGROUND_PENDING_BATCHED_STATUSES})"
+    detail_line="batched_background_migrations (batched фоновые миграции): ${BACKGROUND_PENDING_BATCHED}"
+    formatted=""
+    if formatted=$(background_format_status_bullet_lines "$batched_status_raw" '    ' '- '); then
+      detail_line+=$'\n'"  Разбивка по статусам:"
+      detail_line+=$'\n'"${formatted}"
     fi
     detail_lines+=("$detail_line")
-    if [ "${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL:-0}" -gt 0 ]; then
-      detail_line="batched_background_migration_jobs: ${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL}"
-      if [ -n "$BACKGROUND_PENDING_BATCHED_JOBS" ]; then
-        detail_line+=" (${BACKGROUND_PENDING_BATCHED_JOBS})"
-      fi
-      detail_lines+=("$detail_line")
+  fi
+
+  if [ "${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL:-0}" -gt 0 ]; then
+    detail_line="batched_background_migration_jobs (batched задачи): ${BACKGROUND_PENDING_BATCHED_JOBS_TOTAL}"
+    formatted=""
+    if formatted=$(background_format_status_bullet_lines "$batched_jobs_status_raw" '    ' '- '); then
+      detail_line+=$'\n'"  Разбивка по статусам:"
+      detail_line+=$'\n'"${formatted}"
     fi
+    detail_lines+=("$detail_line")
   fi
 
   if background_psql_table_exists 'public.background_migration_jobs'; then
@@ -709,9 +723,9 @@ background_collect_pending() {
           total=$((total + trimmed))
           query="SELECT ${legacy_status_expr} || '=' || COUNT(*) FROM background_migration_jobs WHERE ${legacy_condition} GROUP BY ${legacy_status_expr} ORDER BY ${legacy_status_expr}"
           if background_psql "$query"; then
-            legacy_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
-            BACKGROUND_PENDING_LEGACY_STATUSES="$(background_format_status_lines "$legacy_raw")"
-            if [ -n "$legacy_raw" ] && printf '%s\n' "$legacy_raw" | grep -Eq '^(failed|errored)='; then
+            status_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
+            legacy_status_raw="$status_raw"
+            if [ -n "$status_raw" ] && printf '%s\n' "$status_raw" | grep -Eq '^(failed|errored)='; then
               background_append_blocker "background_migration_jobs: есть записи со статусами failed/errored"
             fi
           else
@@ -733,9 +747,11 @@ background_collect_pending() {
 
 
   if [ "$BACKGROUND_PENDING_LEGACY" -gt 0 ]; then
-    detail_line="background_migration_jobs: ${BACKGROUND_PENDING_LEGACY}"
-    if [ -n "$BACKGROUND_PENDING_LEGACY_STATUSES" ]; then
-      detail_line+=" (${BACKGROUND_PENDING_LEGACY_STATUSES})"
+    detail_line="background_migration_jobs (legacy фоновые миграции): ${BACKGROUND_PENDING_LEGACY}"
+    formatted=""
+    if formatted=$(background_format_status_bullet_lines "$legacy_status_raw" '    ' '- '); then
+      detail_line+=$'\n'"  Разбивка по статусам:"
+      detail_line+=$'\n'"${formatted}"
     fi
     detail_lines+=("$detail_line")
   fi

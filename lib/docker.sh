@@ -1,11 +1,32 @@
 # lib/docker.sh
 # shellcheck shell=bash
 LAST_HEALTH_OK=1
+# shellcheck disable=SC2034 # используется в runtime.sh и backup.sh при формировании отчётов
 LAST_HEALTH_ISSUES=""
+# shellcheck disable=SC2034 # считывается из runtime.sh
 LAST_HEALTH_HTTP_INFO=""
+# shellcheck disable=SC2034 # считывается из runtime.sh
 LAST_HEALTH_HOST_HTTP_INFO=""
 HTTP_FAILURE_HINT_SHOWN=0
+HTTP_DIAG_LAST_HASH=""
 declare -Ag DEXEC_WAIT_LOG_TS=()
+
+string_fingerprint() {
+  local input="$1"
+  local -a hash_cmd
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash_cmd=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    hash_cmd=(shasum -a 256)
+  elif command -v md5sum >/dev/null 2>&1; then
+    hash_cmd=(md5sum)
+  else
+    hash_cmd=(cksum)
+  fi
+
+  printf '%s' "$input" | "${hash_cmd[@]}" | awk '{print $1}'
+}
 
 dexec_shorten_command() {
   local cmd="$1"
@@ -379,6 +400,7 @@ report_basic_health() {
     http_info="$http_output"
     warn "    - HTTP (из контейнера): ${http_info:-проверка не выполнена}"
   fi
+  # shellcheck disable=SC2034 # значение читается из runtime.sh
   LAST_HEALTH_HTTP_INFO="${http_info:-проверка не выполнена}"
 
   if host_http_output=$(probe_gitlab_http_host); then
@@ -390,6 +412,7 @@ report_basic_health() {
     host_http_info="$host_http_output"
     warn "    - HTTP (с хоста): ${host_http_info:-проверка не выполнена}"
   fi
+  # shellcheck disable=SC2034 # значение читается из runtime.sh
   LAST_HEALTH_HOST_HTTP_INFO="${host_http_info:-проверка не выполнена}"
 
   local ctl_output ctl_rc=0
@@ -432,6 +455,8 @@ report_basic_health() {
 
   if [ "${http_rc:-1}" -ne 0 ] || [ "${host_http_rc:-1}" -ne 0 ]; then
     print_http_failure_diagnostics "$context"
+  else
+    HTTP_DIAG_LAST_HASH=""
   fi
 
   if [ ${#issues[@]} -gt 0 ]; then
@@ -439,6 +464,7 @@ report_basic_health() {
     LAST_HEALTH_ISSUES=$(IFS='; '; echo "${issues[*]}")
   else
     LAST_HEALTH_OK=1
+    # shellcheck disable=SC2034 # используется внешними сценариями для итогового отчёта
     LAST_HEALTH_ISSUES="OK"
   fi
 
@@ -452,7 +478,7 @@ print_http_failure_diagnostics() {
 
   if [ "${HTTP_FAILURE_HINT_SHOWN:-0}" -eq 0 ]; then
     log "      Где искать дополнительную информацию на хосте:"
-    log "        Лог миграции: $LOG_FILE"
+    log "        Лог миграции: ${LOG_FILE:-не задан}"
     log "        Логи GitLab: $DATA_ROOT/logs"
     HTTP_FAILURE_HINT_SHOWN=1
   fi
@@ -485,7 +511,21 @@ EOS
 )
 
   if [ -n "$script" ]; then
-    dexec "$script" 2>&1 | sed 's/^/      /' >&2 || true
+    local diagnostics="" diagnostics_hash=""
+    diagnostics=$(dexec "$script" 2>&1 || true)
+
+    if [ -n "$diagnostics" ]; then
+      diagnostics_hash=$(string_fingerprint "$diagnostics")
+    fi
+
+    if [ -n "$diagnostics_hash" ] && [ "$diagnostics_hash" = "$HTTP_DIAG_LAST_HASH" ]; then
+      log "      (Диагностика логов не изменилась — повторный вывод пропущен)"
+    else
+      HTTP_DIAG_LAST_HASH="$diagnostics_hash"
+      printf '%s\n' "$diagnostics" | sed 's/^/      /' >&2
+    fi
+  else
+    HTTP_DIAG_LAST_HASH=""
   fi
 
   log "      Команды для ручной диагностики:"
@@ -676,18 +716,21 @@ wait_container_health() {
 # New function to wait for upgrade completion with timeout
 wait_upgrade_completion() {
   local timeout=$((60 * 30)) # 30 minutes timeout
-  local start_time=$(date +%s)
+  local start_time
   local current_time
   local elapsed=0
   local last_log_size=0
   local log_file="/var/log/gitlab/reconfigure.log"
+
+  start_time=$(date +%s)
 
   log "[>] Ожидаю завершение апгрейда (таймаут 30 минут)..."
 
   while [ $elapsed -lt $timeout ]; do
     # Check if reconfigure log exists and is growing
     if dexec "[ -f '$log_file' ]" >/dev/null 2>&1; then
-      local current_log_size=$(dexec "stat -c%s '$log_file'" 2>/dev/null || echo 0)
+      local current_log_size
+      current_log_size=$(dexec "stat -c%s '$log_file'" 2>/dev/null || echo 0)
       if [ "$current_log_size" -gt "$last_log_size" ]; then
         last_log_size="$current_log_size"
         # Log is still growing - upgrade in progress

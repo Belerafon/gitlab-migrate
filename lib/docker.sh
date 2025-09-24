@@ -18,6 +18,13 @@ GITLAB_RAKE_PATH=""
 # используется в background.sh и backup.sh для сообщений об ошибках
 GITLAB_RAKE_ERROR=""
 
+GITLAB_RAILS_RESOLVED=0
+GITLAB_RAILS_MODE=""
+GITLAB_RAILS_PATH=""
+# shellcheck disable=SC2034
+# используется в background.sh для сообщений об ошибках
+GITLAB_RAILS_ERROR=""
+
 string_fingerprint() {
   local input="$1"
   local -a hash_cmd
@@ -252,6 +259,75 @@ gitlab_rake() {
   cmd+="su -s /bin/bash git -c ${quoted_rake_cmd}; "
   cmd+="fi"
 
+  dexec "$cmd"
+}
+
+gitlab_rails_resolve() {
+  if [ "${GITLAB_RAILS_RESOLVED:-0}" -eq 1 ] && [ "${GITLAB_RAILS_MODE:-missing}" != "missing" ]; then
+    return 0
+  fi
+
+  GITLAB_RAILS_ERROR=""
+  GITLAB_RAILS_MODE=""
+  GITLAB_RAILS_PATH=""
+
+  if dexec 'command -v gitlab-rails >/dev/null 2>&1'; then
+    GITLAB_RAILS_MODE="direct"
+    GITLAB_RAILS_PATH="gitlab-rails"
+    GITLAB_RAILS_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -x /opt/gitlab/bin/gitlab-rails ]'; then
+    GITLAB_RAILS_MODE="direct"
+    GITLAB_RAILS_PATH="/opt/gitlab/bin/gitlab-rails"
+    GITLAB_RAILS_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -x /opt/gitlab/embedded/bin/gitlab-rails ]'; then
+    GITLAB_RAILS_MODE="direct"
+    GITLAB_RAILS_PATH="/opt/gitlab/embedded/bin/gitlab-rails"
+    GITLAB_RAILS_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -d /opt/gitlab/embedded/service/gitlab-rails ] && [ -f /opt/gitlab/embedded/service/gitlab-rails/bin/rails ]'; then
+    GITLAB_RAILS_MODE="bundle"
+    GITLAB_RAILS_PATH="/opt/gitlab/embedded/service/gitlab-rails"
+    GITLAB_RAILS_RESOLVED=1
+    return 0
+  fi
+
+  GITLAB_RAILS_MODE="missing"
+  GITLAB_RAILS_PATH=""
+  # shellcheck disable=SC2034
+  GITLAB_RAILS_ERROR="Команда gitlab-rails недоступна и не удалось определить bundle exec rails"
+  GITLAB_RAILS_RESOLVED=0
+  return 1
+}
+
+gitlab_rails_available() {
+  gitlab_rails_resolve
+}
+
+gitlab_rails_runner() {
+  local code="$1" env="${2:-production}" escaped_code cmd cd_path
+
+  if ! gitlab_rails_resolve; then
+    return 127
+  fi
+
+  escaped_code=$(printf '%q' "$code")
+
+  if [ "${GITLAB_RAILS_MODE}" = "direct" ]; then
+    cmd="${GITLAB_RAILS_PATH} runner -e ${env} ${escaped_code}"
+    dexec "$cmd"
+    return $?
+  fi
+
+  cd_path=$(printf '%q' "$GITLAB_RAILS_PATH")
+  cmd="cd ${cd_path} && RAILS_ENV=${env} bundle exec rails runner -e ${env} ${escaped_code}"
   dexec "$cmd"
 }
 

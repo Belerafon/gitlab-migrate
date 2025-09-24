@@ -14,7 +14,13 @@ BACKGROUND_PENDING_BLOCKED=0
 BACKGROUND_PENDING_BLOCKER_MSG=""
 BACKGROUND_PENDING_BATCHED=0
 BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
-BACKGROUND_PENDING_LEGACY=0
+BACKGROUND_PENDING_LEGACY_STALE=0
+BACKGROUND_PENDING_LEGACY_STALE_DETAILS=""
+BACKGROUND_LEGACY_QUEUE_LOADED=0
+BACKGROUND_LEGACY_QUEUE_RC=0
+BACKGROUND_LEGACY_QUEUE_ERROR=""
+BACKGROUND_LEGACY_QUEUE_COUNT=""
+BACKGROUND_LEGACY_QUEUE_TRACKED=""
 
 indent_with_prefix() {
   local prefix="${1:-      }"
@@ -87,6 +93,65 @@ background_append_psql_error() {
     message="${message}"$'\n'"${output}"
   fi
   background_append_error_msg "$message"
+}
+
+background_load_legacy_queue_stats() {
+  if [ "${BACKGROUND_LEGACY_QUEUE_LOADED:-0}" -eq 1 ]; then
+    return ${BACKGROUND_LEGACY_QUEUE_RC:-0}
+  fi
+
+  BACKGROUND_LEGACY_QUEUE_LOADED=1
+  BACKGROUND_LEGACY_QUEUE_RC=0
+  BACKGROUND_LEGACY_QUEUE_ERROR=""
+  BACKGROUND_LEGACY_QUEUE_COUNT=""
+  BACKGROUND_LEGACY_QUEUE_TRACKED=""
+
+  if ! gitlab_rails_available; then
+    BACKGROUND_LEGACY_QUEUE_RC=127
+    BACKGROUND_LEGACY_QUEUE_ERROR="${GITLAB_RAILS_ERROR:-Команда gitlab-rails недоступна}"
+    return 1
+  fi
+
+  local code output line value trimmed normalized
+  code=$'puts "remaining=#{Gitlab::BackgroundMigration.remaining}"\nputs "tracked=#{Gitlab::Database::BackgroundMigrationJob.pending.count}"'
+
+  if output=$(gitlab_rails_runner "$code" 2>&1); then
+    normalized="$(printf '%s' "$output" | tr -d '\r')"
+    while IFS= read -r line; do
+      case "$line" in
+        remaining=*)
+          value="${line#remaining=}"
+          trimmed="$(printf '%s' "$value" | tr -d '[:space:]')"
+          if [[ "$trimmed" =~ ^[0-9]+$ ]]; then
+            BACKGROUND_LEGACY_QUEUE_COUNT="$trimmed"
+          fi
+          ;;
+        tracked=*)
+          value="${line#tracked=}"
+          trimmed="$(printf '%s' "$value" | tr -d '[:space:]')"
+          if [[ "$trimmed" =~ ^[0-9]+$ ]]; then
+            BACKGROUND_LEGACY_QUEUE_TRACKED="$trimmed"
+          fi
+          ;;
+      esac
+    done <<< "$normalized"
+
+    if [ -z "$BACKGROUND_LEGACY_QUEUE_COUNT" ] || ! [[ "$BACKGROUND_LEGACY_QUEUE_COUNT" =~ ^[0-9]+$ ]]; then
+      BACKGROUND_LEGACY_QUEUE_RC=1
+      BACKGROUND_LEGACY_QUEUE_ERROR="Не удалось разобрать вывод gitlab-rails runner (remaining)"$'\n'"${normalized}"
+      return 1
+    fi
+
+    if [ -n "$BACKGROUND_LEGACY_QUEUE_TRACKED" ] && ! [[ "$BACKGROUND_LEGACY_QUEUE_TRACKED" =~ ^[0-9]+$ ]]; then
+      BACKGROUND_LEGACY_QUEUE_TRACKED=""
+    fi
+
+    return 0
+  fi
+
+  BACKGROUND_LEGACY_QUEUE_RC=$?
+  BACKGROUND_LEGACY_QUEUE_ERROR="$output"
+  return 1
 }
 
 background_load_rake_tasks() {
@@ -550,6 +615,23 @@ background_migrations_extra_diagnostics() {
   background_print_manual_hints "$inner"
 }
 
+background_print_stale_warnings() {
+  local indent="${1:-    }"
+
+  if [ "${BACKGROUND_PENDING_LEGACY_STALE:-0}" -le 0 ]; then
+    return
+  fi
+
+  warn "${indent}Обнаружены записи legacy фоновых миграций со статусом pending, но очередь Gitlab::BackgroundMigration пуста. Предположительно, это остаточные записи отслеживания после успешного выполнения."
+  if [ -n "${BACKGROUND_LEGACY_QUEUE_COUNT:-}" ]; then
+    log "${indent}  Gitlab::BackgroundMigration.remaining => ${BACKGROUND_LEGACY_QUEUE_COUNT}"
+  fi
+  if [ -n "${BACKGROUND_PENDING_LEGACY_STALE_DETAILS:-}" ]; then
+    printf '%s\n' "${BACKGROUND_PENDING_LEGACY_STALE_DETAILS}" | indent_with_prefix "${indent}  "
+  fi
+  log "${indent}  Проверь конкретные задачи через gitlab-rails runner -e production 'puts Gitlab::Database::BackgroundMigrationJob.pending.pluck(:class_name, :arguments, :updated_at)' и при необходимости отметь завершённые миграции через mark_all_as_succeeded."
+}
+
 background_migrations_status_report() {
   local indent="${1:-}"
   local sub="${indent}  "
@@ -607,13 +689,20 @@ background_collect_pending() {
   BACKGROUND_PENDING_BLOCKER_MSG=""
   BACKGROUND_PENDING_BATCHED=0
   BACKGROUND_PENDING_BATCHED_JOBS_TOTAL=0
-  BACKGROUND_PENDING_LEGACY=0
+  BACKGROUND_PENDING_LEGACY_STALE=0
+  BACKGROUND_PENDING_LEGACY_STALE_DETAILS=""
+  BACKGROUND_LEGACY_QUEUE_LOADED=0
+  BACKGROUND_LEGACY_QUEUE_RC=0
+  BACKGROUND_LEGACY_QUEUE_ERROR=""
+  BACKGROUND_LEGACY_QUEUE_COUNT=""
+  BACKGROUND_LEGACY_QUEUE_TRACKED=""
 
   local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" detail_line=""
   local batched_status_expr="" batched_condition="" batched_job_status_expr="" batched_job_condition=""
   local legacy_status_expr="" legacy_condition=""
   local batched_status_raw="" batched_jobs_status_raw="" legacy_status_raw=""
   local formatted=""
+  local legacy_pending_count=0 legacy_detail_line="" queue_count="" treat_as_pending=1
   local batched_table_check="SELECT to_regclass('public.batched_background_migrations')::text"
   local batched_jobs_table_check="SELECT to_regclass('public.batched_background_migration_jobs')::text"
   local legacy_table_check="SELECT to_regclass('public.background_migration_jobs')::text"
@@ -718,9 +807,8 @@ background_collect_pending() {
       count_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
       trimmed="$(printf '%s' "$count_raw" | tr -d '[:space:]')"
       if [[ "$trimmed" =~ ^[0-9]+$ ]]; then
-        BACKGROUND_PENDING_LEGACY="$trimmed"
-        if [ "$trimmed" -gt 0 ]; then
-          total=$((total + trimmed))
+        legacy_pending_count="$trimmed"
+        if [ "$legacy_pending_count" -gt 0 ]; then
           query="SELECT ${legacy_status_expr} || '=' || COUNT(*) FROM background_migration_jobs WHERE ${legacy_condition} GROUP BY ${legacy_status_expr} ORDER BY ${legacy_status_expr}"
           if background_psql "$query"; then
             status_raw="$(background_normalize_lines "${BACKGROUND_LAST_PSQL_OUTPUT:-}")"
@@ -746,14 +834,35 @@ background_collect_pending() {
   fi
 
 
-  if [ "$BACKGROUND_PENDING_LEGACY" -gt 0 ]; then
-    detail_line="background_migration_jobs (legacy фоновые миграции): ${BACKGROUND_PENDING_LEGACY}"
+  if [ "$legacy_pending_count" -gt 0 ]; then
+    legacy_detail_line="background_migration_jobs (legacy фоновые миграции): ${legacy_pending_count}"
     formatted=""
     if formatted=$(background_format_status_bullet_lines "$legacy_status_raw" '    ' '- '); then
-      detail_line+=$'\n'"  Разбивка по статусам:"
-      detail_line+=$'\n'"${formatted}"
+      legacy_detail_line+=$'\n'"  Разбивка по статусам:"
+      legacy_detail_line+=$'\n'"${formatted}"
     fi
-    detail_lines+=("$detail_line")
+
+    treat_as_pending=1
+    if [ "${BACKGROUND_PENDING_BLOCKED:-0}" -eq 0 ]; then
+      if background_load_legacy_queue_stats; then
+        queue_count="${BACKGROUND_LEGACY_QUEUE_COUNT:-}"
+        if [[ "$queue_count" =~ ^[0-9]+$ ]] && [ "$queue_count" -eq 0 ]; then
+          treat_as_pending=0
+        fi
+      else
+        if [ -n "${BACKGROUND_LEGACY_QUEUE_ERROR:-}" ]; then
+          background_append_error_msg "gitlab-rails runner (Gitlab::BackgroundMigration.remaining): ${BACKGROUND_LEGACY_QUEUE_ERROR}"
+        fi
+      fi
+    fi
+
+    if [ "$treat_as_pending" -eq 1 ]; then
+      total=$((total + legacy_pending_count))
+      detail_lines+=("$legacy_detail_line")
+    else
+      BACKGROUND_PENDING_LEGACY_STALE="$legacy_pending_count"
+      BACKGROUND_PENDING_LEGACY_STALE_DETAILS="$legacy_detail_line"
+    fi
   fi
 
   BACKGROUND_PENDING_TOTAL=$total
@@ -811,6 +920,7 @@ background_wait_for_completion() {
         else
           ok "Фоновые миграции уже завершены${context:+ (${context})}"
         fi
+        background_print_stale_warnings "    "
         return 0
         ;;
       1)

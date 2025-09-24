@@ -11,6 +11,13 @@ HTTP_FAILURE_HINT_SHOWN=0
 HTTP_DIAG_LAST_HASH=""
 declare -Ag DEXEC_WAIT_LOG_TS=()
 
+GITLAB_RAKE_RESOLVED=0
+GITLAB_RAKE_MODE=""
+GITLAB_RAKE_PATH=""
+# shellcheck disable=SC2034
+# используется в background.sh и backup.sh для сообщений об ошибках
+GITLAB_RAKE_ERROR=""
+
 string_fingerprint() {
   local input="$1"
   local -a hash_cmd
@@ -147,6 +154,105 @@ dexec() {
   fi
 
   return $rc
+}
+
+gitlab_rake_resolve() {
+  if [ "${GITLAB_RAKE_RESOLVED:-0}" -eq 1 ] && [ "${GITLAB_RAKE_MODE:-missing}" != "missing" ]; then
+    return 0
+  fi
+
+  GITLAB_RAKE_ERROR=""
+  GITLAB_RAKE_MODE=""
+  GITLAB_RAKE_PATH=""
+
+  if dexec 'command -v gitlab-rake >/dev/null 2>&1'; then
+    GITLAB_RAKE_MODE="direct"
+    GITLAB_RAKE_PATH="gitlab-rake"
+    GITLAB_RAKE_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -x /opt/gitlab/bin/gitlab-rake ]'; then
+    GITLAB_RAKE_MODE="direct"
+    GITLAB_RAKE_PATH="/opt/gitlab/bin/gitlab-rake"
+    GITLAB_RAKE_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -x /opt/gitlab/embedded/bin/gitlab-rake ]'; then
+    GITLAB_RAKE_MODE="direct"
+    GITLAB_RAKE_PATH="/opt/gitlab/embedded/bin/gitlab-rake"
+    GITLAB_RAKE_RESOLVED=1
+    return 0
+  fi
+
+  if dexec '[ -d /opt/gitlab/embedded/service/gitlab-rails ] && [ -f /opt/gitlab/embedded/service/gitlab-rails/Rakefile ]'; then
+    GITLAB_RAKE_MODE="bundle"
+    GITLAB_RAKE_PATH="/opt/gitlab/embedded/service/gitlab-rails"
+    GITLAB_RAKE_RESOLVED=1
+    return 0
+  fi
+
+  GITLAB_RAKE_MODE="missing"
+  GITLAB_RAKE_PATH=""
+  # shellcheck disable=SC2034
+  GITLAB_RAKE_ERROR="Команда gitlab-rake не найдена и не удалось определить bundle exec rake"
+  GITLAB_RAKE_RESOLVED=0
+  return 1
+}
+
+gitlab_rake_available() {
+  gitlab_rake_resolve
+}
+
+gitlab_rake() {
+  local args=() args_str="" quoted rake_cmd quoted_rake_cmd cmd cd_path
+
+  if ! gitlab_rake_resolve; then
+    return 127
+  fi
+
+  if [ "$#" -gt 0 ]; then
+    args=("$@")
+    for quoted in "${args[@]}"; do
+      quoted=$(printf '%q' "$quoted")
+      if [ -z "$args_str" ]; then
+        args_str="$quoted"
+      else
+        args_str+=" $quoted"
+      fi
+    done
+  fi
+
+  if [ "${GITLAB_RAKE_MODE}" = "direct" ]; then
+    if [ -n "$args_str" ]; then
+      cmd="${GITLAB_RAKE_PATH} ${args_str}"
+    else
+      cmd="${GITLAB_RAKE_PATH}"
+    fi
+    dexec "$cmd"
+    return $?
+  fi
+
+  # bundle mode fallback
+  rake_cmd="bundle exec rake"
+  if [ -n "$args_str" ]; then
+    rake_cmd+=" ${args_str}"
+  fi
+  rake_cmd+=" RAILS_ENV=production"
+  quoted_rake_cmd=$(printf '%q' "$rake_cmd")
+  cd_path=$(printf '%q' "$GITLAB_RAKE_PATH")
+
+  cmd="cd ${cd_path} && "
+  cmd+="if command -v chpst >/dev/null 2>&1; then "
+  cmd+="chpst -u git bash -lc ${quoted_rake_cmd}; "
+  cmd+="elif command -v sudo >/dev/null 2>&1; then "
+  cmd+="sudo -u git -H bash -lc ${quoted_rake_cmd}; "
+  cmd+="else "
+  cmd+="su -s /bin/bash git -c ${quoted_rake_cmd}; "
+  cmd+="fi"
+
+  dexec "$cmd"
 }
 
 container_running() {

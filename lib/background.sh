@@ -95,16 +95,24 @@ background_load_rake_tasks() {
   fi
 
   local output rc
-  if output=$(dexec 'gitlab-rake -T 2>/dev/null' 2>&1); then
-    BACKGROUND_RAKE_TASKS_CACHE="$output"
-    BACKGROUND_RAKE_TASKS_ERROR=""
-    BACKGROUND_RAKE_TASKS_RC=0
+
+  if gitlab_rake_available; then
+    if output=$(gitlab_rake -T 2>/dev/null); then
+      BACKGROUND_RAKE_TASKS_CACHE="$output"
+      BACKGROUND_RAKE_TASKS_ERROR=""
+      BACKGROUND_RAKE_TASKS_RC=0
+    else
+      rc=$?
+      BACKGROUND_RAKE_TASKS_CACHE=""
+      BACKGROUND_RAKE_TASKS_ERROR="$output"
+      BACKGROUND_RAKE_TASKS_RC=$rc
+    fi
   else
-    rc=$?
     BACKGROUND_RAKE_TASKS_CACHE=""
-    BACKGROUND_RAKE_TASKS_ERROR="$output"
-    BACKGROUND_RAKE_TASKS_RC=$rc
+    BACKGROUND_RAKE_TASKS_ERROR="${GITLAB_RAKE_ERROR:-Команда gitlab-rake недоступна}"
+    BACKGROUND_RAKE_TASKS_RC=127
   fi
+
   BACKGROUND_RAKE_TASKS_LOADED=1
 }
 
@@ -362,7 +370,7 @@ background_print_pending_task() {
   local indent="$1" pending_output pending_rc
 
   if background_rake_task_exists "gitlab:background_migrations:pending"; then
-    if pending_output=$(dexec 'gitlab-rake gitlab:background_migrations:pending' 2>&1); then
+    if pending_output=$(gitlab_rake gitlab:background_migrations:pending 2>&1); then
       pending_rc=0
     else
       pending_rc=$?
@@ -563,7 +571,7 @@ background_migrations_status_report() {
     return 0
   fi
 
-  if status_output=$(dexec 'gitlab-rake gitlab:background_migrations:status' 2>&1); then
+  if status_output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
     status_rc=0
   else
     status_rc=$?

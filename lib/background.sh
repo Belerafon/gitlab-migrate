@@ -221,21 +221,79 @@ background_psql() {
   return $BACKGROUND_LAST_PSQL_RC
 }
 
-background_psql_table_exists() {
-  local regclass="$1" query value trimmed rc
-  query="SELECT to_regclass('${regclass}')::text"
+background_regclass_candidates() {
+  local input="$1" base="" schema="" candidate="" seen=""
+  local -a schemas=(public gitlab_partitions_static gitlab_partitions_dynamic gitlab_internal)
 
-  if background_psql "$query"; then
-    value="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
-    trimmed="$(printf '%s' "$value" | tr -d '[:space:]')"
-    if [ -n "$trimmed" ]; then
-      return 0
-    fi
-    return 1
+  if [ -z "$input" ]; then
+    return
   fi
 
-  rc=$?
-  return 2
+  base="$input"
+  if [[ "$input" == *.* ]]; then
+    base="${input##*.}"
+  fi
+
+  candidate="$input"
+  if [ -n "$candidate" ]; then
+    case " $seen " in
+      *" $candidate "*) ;;
+      *)
+        printf '%s\n' "$candidate"
+        seen+=" $candidate"
+        ;;
+    esac
+  fi
+
+  if [ -n "$base" ] && [ "$base" != "$input" ]; then
+    candidate="$base"
+    case " $seen " in
+      *" $candidate "*) ;;
+      *)
+        printf '%s\n' "$candidate"
+        seen+=" $candidate"
+        ;;
+    esac
+  fi
+
+  if [ -z "$base" ]; then
+    return
+  fi
+
+  for schema in "${schemas[@]}"; do
+    candidate="${schema}.${base}"
+    case " $seen " in
+      *" $candidate "*)
+        continue
+        ;;
+    esac
+    printf '%s\n' "$candidate"
+    seen+=" $candidate"
+  done
+}
+
+background_psql_table_exists() {
+  local regclass="$1" query value trimmed rc candidate="" escaped=""
+
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    escaped="${candidate//\'/''}"
+    query="SELECT to_regclass('${escaped}')::text"
+
+    if background_psql "$query"; then
+      value="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+      trimmed="$(printf '%s' "$value" | tr -d '[:space:]')"
+      if [ -n "$trimmed" ]; then
+        return 0
+      fi
+      continue
+    fi
+
+    rc=$?
+    return 2
+  done < <(background_regclass_candidates "$regclass")
+
+  return 1
 }
 
 background_table_base_name() {
@@ -252,16 +310,32 @@ background_table_base_name() {
 }
 
 background_psql_column_type() {
-  local regclass="$1" column="$2" query type_raw type_trimmed
+  local regclass="$1" column="$2" query type_raw type_trimmed rc candidate="" escaped="" column_escaped=""
 
-  query="SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = '${regclass}'::regclass AND attname = '${column}'"
-
-  if background_psql "$query"; then
-    type_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
-    type_trimmed="$(printf '%s' "$type_raw" | tr -d '[:space:]')"
-    printf '%s' "$type_trimmed"
-    return 0
+  if [ -z "$column" ]; then
+    return 1
   fi
+
+  column_escaped="${column//\'/''}"
+
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    escaped="${candidate//\'/''}"
+    query="SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = '${escaped}'::regclass AND attname = '${column_escaped}'"
+
+    if background_psql "$query"; then
+      type_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+      type_trimmed="$(printf '%s' "$type_raw" | tr -d '[:space:]')"
+      if [ -n "$type_trimmed" ]; then
+        printf '%s' "$type_trimmed"
+        return 0
+      fi
+      continue
+    fi
+
+    rc=$?
+    return $rc
+  done < <(background_regclass_candidates "$regclass")
 
   return 1
 }
@@ -703,9 +777,9 @@ background_collect_pending() {
   local batched_status_raw="" batched_jobs_status_raw="" legacy_status_raw=""
   local formatted=""
   local legacy_pending_count=0 legacy_detail_line="" queue_count="" treat_as_pending=1
-  local batched_table_check="SELECT to_regclass('public.batched_background_migrations')::text"
-  local batched_jobs_table_check="SELECT to_regclass('public.batched_background_migration_jobs')::text"
-  local legacy_table_check="SELECT to_regclass('public.background_migration_jobs')::text"
+  local batched_table_check="SELECT to_regclass('batched_background_migrations')::text"
+  local batched_jobs_table_check="SELECT to_regclass('batched_background_migration_jobs')::text"
+  local legacy_table_check="SELECT to_regclass('background_migration_jobs')::text"
   local -a detail_lines=()
 
   if background_psql_table_exists 'public.batched_background_migrations'; then

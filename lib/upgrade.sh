@@ -50,7 +50,9 @@ EOF
 
 # Function to get the latest patch version for a given series
 latest_patch_tag() {
-  local series="$1" patch="${UPGRADE_SERIES_PATCH[$series]:-}" 
+  local series patch
+  series="$1"
+  patch="${UPGRADE_SERIES_PATCH[$series]:-}"
   if [ -n "$patch" ]; then
     echo "$patch"
   else
@@ -188,7 +190,12 @@ compute_stops() {
 }
 
 get_skipped_optional_stops() {
-  printf '%s\n' "${UPGRADE_SKIPPED_OPTIONALS[@]}"
+  local series
+
+  for series in "${UPGRADE_SKIPPED_OPTIONALS[@]}"; do
+    [ -n "$series" ] || continue
+    printf '%s\n' "$series"
+  done
 }
 
 format_bytes_human() {

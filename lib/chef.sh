@@ -4,6 +4,38 @@
 # AWK-программа для фильтрации потока Chef, уменьшает шум и оставляет только ключевые события.
 # Используем heredoc, чтобы избежать ручного экранирования и появления лишних символов.
 CHEF_FILTER_AWK=$(cat <<'AWK'
+function reset_resource() {
+  current_resource="";
+  current_force=0;
+  current_has_change=0;
+  current_printed=0;
+  delete change_lines;
+  change_idx=0;
+}
+
+function flush_resource(force) {
+  if (current_resource == "") {
+    return;
+  }
+
+  if (force || current_has_change || current_force) {
+    if (!current_printed) {
+      print "[chef]   • " current_resource;
+      current_printed=1;
+    }
+
+    if (change_idx > 0) {
+      for (i = 0; i < change_idx; i++) {
+        if (length(change_lines[i])) {
+          print "[chef]       - " change_lines[i];
+        }
+      }
+    }
+  }
+
+  reset_resource();
+}
+
 BEGIN {
   current_recipe="";
   printed_stage["Running reconfigure"]=0;
@@ -13,6 +45,8 @@ BEGIN {
   printed_stage["Toggling services"]=0;
   printed_stage["==== Upgrade has completed ===="]=0;
   printed_stage["Please verify everything is working"]=0;
+
+  reset_resource();
 }
 {
   line=$0;
@@ -23,15 +57,23 @@ BEGIN {
   lower=tolower(lower);
 
   if (trimmed ~ /^Starting Chef Infra Client/) {
+    flush_resource(0);
     print "[chef] " trimmed;
     next;
   }
   if (trimmed ~ /^Running handlers/ || trimmed ~ /^Chef Infra Client (finished|failed)/) {
+    flush_resource(0);
     print "[chef] " trimmed;
     next;
   }
 
+  if (trimmed == "") {
+    flush_resource(0);
+    next;
+  }
+
   if (trimmed ~ /^Recipe: /) {
+    flush_resource(0);
     recipe=substr(trimmed, 9);
     if (recipe != current_recipe) {
       current_recipe=recipe;
@@ -42,6 +84,7 @@ BEGIN {
 
   for (stage in printed_stage) {
     if (stage != "" && index(trimmed, stage) == 1) {
+      flush_resource(0);
       if (printed_stage[stage] == 0) {
         print "[chef] " stage;
         printed_stage[stage]=1;
@@ -51,20 +94,30 @@ BEGIN {
   }
 
   if (index(lower, "error") || index(lower, "fatal") || index(lower, "critical")) {
+    flush_resource(1);
     print "[chef][ERR] " trimmed;
     next;
   }
   if (index(lower, "warn")) {
+    flush_resource(1);
     print "[chef][WARN] " trimmed;
     next;
   }
 
   if (trimmed ~ /^\*/) {
-    if (trimmed ~ /\(up to date\)/ || trimmed ~ /\(skipped due to/) {
+    flush_resource(0);
+    if (trimmed ~ /\(up to date\)/ || trimmed ~ /\(skipped due to/ || trimmed ~ /action nothing/) {
       next;
     }
     sub(/^\* +/, "", trimmed);
-    print "[chef]   • " trimmed;
+    current_resource=trimmed;
+    current_force=0;
+    current_has_change=0;
+    current_printed=0;
+
+    if (current_resource ~ / action (run|start|stop|restart|migrate)/) {
+      current_force=1;
+    }
     next;
   }
 
@@ -72,9 +125,29 @@ BEGIN {
     if (trimmed ~ /\(up to date\)/ || trimmed ~ /\(skipped due to/) {
       next;
     }
-    print "[chef]     " trimmed;
+
+    if (current_resource == "") {
+      print "[chef]     " trimmed;
+      next;
+    }
+
+    detail=trimmed;
+    sub(/^-[[:space:]]*/, "", detail);
+    change_lines[change_idx++] = detail;
+    current_has_change=1;
     next;
   }
+
+  if (current_resource != "") {
+    if (trimmed ~ /^[\[]/ || trimmed ~ /^[A-Za-z0-9_]+:/) {
+      change_lines[change_idx++] = trimmed;
+      current_has_change=1;
+      next;
+    }
+  }
+}
+END {
+  flush_resource(0);
 }
 AWK
 )

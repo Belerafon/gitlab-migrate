@@ -278,7 +278,10 @@ prompt_snapshot_after_upgrade() {
   if ask_yes_no "$prompt" "y"; then
     log "[>] Создаю локальный снапшот после апгрейда до ${target_tag}"
     create_snapshot "$current_version"
-    wait_gitlab_ready
+    if ! wait_gitlab_ready; then
+      err "GitLab не вернулся в строй после создания снапшота"
+      exit 1
+    fi
     wait_postgres_ready
     ok "Снимок после обновления сохранён"
   else
@@ -423,9 +426,15 @@ upgrade_to_series() {
     log "[==>] Апгрейд до gitlab/gitlab-ce:${target}"
     docker pull "gitlab/gitlab-ce:${target}" >/dev/null 2>&1 || warn "pull не обязателен, продолжу"
     run_container "$target"
-    wait_gitlab_ready
+    if ! wait_gitlab_ready; then
+      err "GitLab не стал доступен после запуска образа ${target}"
+      exit 1
+    fi
     wait_postgres_ready
-    wait_upgrade_completion
+    if ! wait_upgrade_completion; then
+      err "Обновление до ${target} не завершилось корректно"
+      exit 1
+    fi
     report_basic_health "после апгрейда до ${target}"
 
     log "[>] Проверка миграций схемы:"
@@ -456,7 +465,10 @@ upgrade_to_series() {
       log "[>] Попытка повторного запуска служб..."
       dexec 'gitlab-ctl restart >/dev/null 2>&1' || true
       sleep "$WAIT_AFTER_START"
-      wait_gitlab_ready
+      if ! wait_gitlab_ready; then
+        err "GitLab не восстановился после перезапуска служб"
+        exit 1
+      fi
       wait_postgres_ready
       current_version=$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo unknown')
       current_base="${current_version%%-*}"

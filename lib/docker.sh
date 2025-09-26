@@ -819,53 +819,142 @@ ensure_permissions() {
 }
 
 wait_gitlab_ready() {
-  local timeout=${READY_TIMEOUT:-900}
-  local progress=${READY_STATUS_INTERVAL:-30}
-  local waited=0
-  local last_report=0
-  local fmt_total="∞"
-  local success=0
+  local ctl_timeout=${READY_TIMEOUT:-900}
+  local ctl_progress=${READY_STATUS_INTERVAL:-30}
+  local http_timeout=${READY_HTTP_TIMEOUT:-$ctl_timeout}
+  local http_progress=${READY_HTTP_PROGRESS:-15}
+  local http_stable_window=${READY_HTTP_STABLE_WINDOW:-30}
+  local ctl_waited=0
+  local ctl_last_report=0
+  local ctl_fmt_total="∞"
+  local ctl_success=0
+  local start_ts now
 
-  log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${timeout}s)…"
+  log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${ctl_timeout}s)…"
 
-  if [ "$timeout" -gt 0 ]; then
-    fmt_total=$(printf "%02d:%02d" $((timeout / 60)) $((timeout % 60)))
+  if [ "${ctl_timeout}" -gt 0 ]; then
+    ctl_fmt_total=$(printf "%02d:%02d" $((ctl_timeout / 60)) $((ctl_timeout % 60)))
   fi
+
+  start_ts=$(date +%s)
 
   while true; do
     if dexec 'gitlab-ctl status >/dev/null 2>&1'; then
-      success=1
+      ctl_success=1
       break
     fi
 
     sleep 3
-    waited=$((waited+3))
+    now=$(date +%s)
+    ctl_waited=$((now - start_ts))
 
-    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+    if [ "${ctl_timeout}" -gt 0 ] && [ "$ctl_waited" -ge "${ctl_timeout}" ]; then
       break
     fi
 
-    if [ "$progress" -gt 0 ] && [ $((waited - last_report)) -ge "$progress" ]; then
+    if [ "${ctl_progress}" -gt 0 ] && [ $((ctl_waited - ctl_last_report)) -ge "${ctl_progress}" ]; then
       local fmt_waited
-      fmt_waited=$(printf "%02d:%02d" $((waited / 60)) $((waited % 60)))
-      if [ "$timeout" -gt 0 ]; then
-        log "    …жду уже ${fmt_waited} из ${fmt_total}"
+      fmt_waited=$(printf "%02d:%02d" $((ctl_waited / 60)) $((ctl_waited % 60)))
+      if [ "${ctl_timeout}" -gt 0 ]; then
+        log "    …жду уже ${fmt_waited} из ${ctl_fmt_total}"
       else
         log "    …жду уже ${fmt_waited}"
       fi
-      last_report=$waited
+      ctl_last_report=$ctl_waited
     fi
   done
 
-  if [ $success -eq 1 ]; then
-    ok "gitlab-ctl status OK"
-  elif [ "$timeout" -gt 0 ]; then
-    warn "gitlab-ctl status не ответил за ${timeout}s — продолжу"
-  else
-    warn "gitlab-ctl status пока недоступен"
+  if [ "$ctl_success" -eq 0 ]; then
+    if [ "${ctl_timeout}" -gt 0 ]; then
+      err "gitlab-ctl status не ответил за ${ctl_timeout}s"
+    else
+      err "gitlab-ctl status не ответил"
+    fi
+    report_basic_health "после ожидания gitlab-ctl status" "skip-db"
+    return 1
   fi
 
-  report_basic_health "после ожидания gitlab-ctl status" "skip-db"
+  ok "gitlab-ctl status OK"
+
+  log "[>] Ожидаю доступность HTTP GitLab (стабильность ${http_stable_window}s; таймаут ${http_timeout}s)…"
+
+  local http_start_ts http_waited=0
+  local http_last_report=0
+  local container_ready_since=0
+  local host_ready_since=0
+  local container_status=""
+  local host_status=""
+  local sleep_interval=5
+  local ready=0
+
+  http_start_ts=$(date +%s)
+
+  while true; do
+    now=$(date +%s)
+    http_waited=$((now - http_start_ts))
+
+    local container_rc=0 host_rc=0
+    container_status=$(probe_gitlab_http 2>&1) || container_rc=$?
+    host_status=$(probe_gitlab_http_host 2>&1) || host_rc=$?
+
+    if [ "$container_rc" -eq 0 ]; then
+      if [ "$container_ready_since" -eq 0 ]; then
+        container_ready_since=$now
+        log "    HTTP из контейнера стал отвечать: ${container_status}"
+      fi
+    else
+      container_ready_since=0
+    fi
+
+    if [ "$host_rc" -eq 0 ]; then
+      if [ "$host_ready_since" -eq 0 ]; then
+        host_ready_since=$now
+        log "    HTTP с хоста стал отвечать: ${host_status}"
+      fi
+    else
+      host_ready_since=0
+    fi
+
+    if [ "$container_ready_since" -gt 0 ] && [ "$host_ready_since" -gt 0 ]; then
+      local earliest_ready="$container_ready_since"
+      if [ "$host_ready_since" -lt "$earliest_ready" ]; then
+        earliest_ready="$host_ready_since"
+      fi
+      local stable_elapsed=$((now - earliest_ready))
+      if [ "$stable_elapsed" -ge "$http_stable_window" ]; then
+        ready=1
+        break
+      fi
+    fi
+
+    if [ "${http_timeout}" -gt 0 ] && [ "$http_waited" -ge "${http_timeout}" ]; then
+      break
+    fi
+
+    if [ "${http_progress}" -gt 0 ] && [ $((http_waited - http_last_report)) -ge "${http_progress}" ]; then
+      local waited_fmt
+      waited_fmt=$(format_duration "$http_waited")
+      log "    …HTTP ещё не готов (ожидание ${waited_fmt}); контейнер: ${container_status:-недоступен}; хост: ${host_status:-недоступен}" \
+        " (статус контейнера: $(container_status_summary))"
+      http_last_report=$http_waited
+    fi
+
+    sleep "$sleep_interval"
+  done
+
+  if [ "$ready" -eq 0 ]; then
+    if [ "${http_timeout}" -gt 0 ]; then
+      err "HTTP GitLab недоступен за $(format_duration "${http_timeout}")"
+    else
+      err "HTTP GitLab недоступен"
+    fi
+    report_basic_health "после ожидания готовности GitLab" "skip-db"
+    return 1
+  fi
+
+  ok "HTTP GitLab готов (контейнер: ${container_status}; хост: ${host_status})"
+
+  report_basic_health "после ожидания готовности GitLab" "skip-db"
 }
 
 wait_postgres_ready() {
@@ -954,44 +1043,114 @@ wait_container_health() {
 
 # New function to wait for upgrade completion with timeout
 wait_upgrade_completion() {
-  local timeout=$((60 * 30)) # 30 minutes timeout
-  local start_time
-  local current_time
-  local elapsed=0
-  local last_log_size=0
+  local timeout=${UPGRADE_COMPLETION_TIMEOUT:-1800}
+  local poll_interval=${UPGRADE_COMPLETION_POLL_INTERVAL:-15}
+  local quiet_window=${UPGRADE_RECONFIGURE_QUIET_WINDOW:-300}
+  local progress_interval=${UPGRADE_COMPLETION_PROGRESS_INTERVAL:-60}
+  local ready_retry_delay=${UPGRADE_COMPLETION_READY_RETRY:-60}
   local log_file="/var/log/gitlab/reconfigure.log"
 
+  local start_time current_time elapsed=0
+  local last_report=0
+  local stat_info="" stat_rc=0
+  local current_mtime=0 current_size=0
+  local last_mtime=0 last_size=0
+  local last_growth_ts=0
+  local seen_activity=0
+  local last_ready_attempt=0
+
   start_time=$(date +%s)
+  last_growth_ts=$start_time
 
-  log "[>] Ожидаю завершение апгрейда (таймаут 30 минут)..."
+  if [ "$poll_interval" -le 0 ]; then
+    poll_interval=15
+  fi
 
-  while [ $elapsed -lt $timeout ]; do
-    # Check if reconfigure log exists and is growing
-    if dexec "[ -f '$log_file' ]" >/dev/null 2>&1; then
-      local current_log_size
-      current_log_size=$(dexec "stat -c%s '$log_file'" 2>/dev/null || echo 0)
-      if [ "$current_log_size" -gt "$last_log_size" ]; then
-        last_log_size="$current_log_size"
-        # Log is still growing - upgrade in progress
-      else
-        # Log hasn't grown in 5 minutes - assume upgrade completed
-        ok "Апгрейд завершён (лог не растёт)"
-        return
+  local timeout_display="∞"
+  if [ "$timeout" -gt 0 ]; then
+    timeout_display=$(format_duration "$timeout")
+  fi
+
+  log "[>] Ожидаю завершение апгрейда (таймаут ${timeout_display})…"
+
+  while true; do
+    current_time=$(date +%s)
+    elapsed=$((current_time - start_time))
+
+    stat_rc=0
+    stat_info=""
+    stat_info=$(dexec "stat -c '%Y %s' '$log_file'" 2>/dev/null) || stat_rc=$?
+    stat_info="${stat_info//$'\r'/}"; stat_info="${stat_info//$'\n'/ }"
+
+    if [ "$stat_rc" -eq 0 ] && [ -n "$stat_info" ]; then
+      current_mtime=${stat_info%% *}
+      current_size=${stat_info##* }
+
+      if ! [[ "$current_mtime" =~ ^[0-9]+$ ]]; then
+        current_mtime=0
+      fi
+      if ! [[ "$current_size" =~ ^[0-9]+$ ]]; then
+        current_size=0
+      fi
+
+      if [ "$last_mtime" -eq 0 ]; then
+        last_mtime=$current_mtime
+        last_size=$current_size
+      fi
+
+      if [ "$current_mtime" -gt "$last_mtime" ] || [ "$current_size" -gt "$last_size" ]; then
+        seen_activity=1
+        last_mtime=$current_mtime
+        last_size=$current_size
+        last_growth_ts=$current_time
       fi
     fi
 
-    # Check if all services are running
-    if dexec "gitlab-ctl status" >/dev/null 2>&1; then
-      ok "Апгрейд завершён (все службы работают)"
-      return
+    local ctl_ok=0
+    if dexec 'gitlab-ctl status >/dev/null 2>&1'; then
+      ctl_ok=1
     fi
 
-    sleep 30
-    current_time=$(date +%s)
-    elapsed=$((current_time - start_time))
-  done
+    local quiet_enough=0
+    local since_growth=$((current_time - last_growth_ts))
 
-  warn "Апгрейд не завершился за 30 минут. Пытаюсь перезапустить..."
-  dexec 'gitlab-ctl restart >/dev/null 2>&1' || true
-  sleep 60
+    if [ "$seen_activity" -eq 1 ]; then
+      if [ "$since_growth" -ge "$quiet_window" ]; then
+        quiet_enough=1
+      fi
+    else
+      if [ "$since_growth" -ge "$quiet_window" ]; then
+        quiet_enough=1
+      fi
+    fi
+
+    if [ "$progress_interval" -gt 0 ] && [ $((elapsed - last_report)) -ge "$progress_interval" ]; then
+      local log_state="нет данных"
+      if [ "$stat_rc" -eq 0 ] && [ -n "$stat_info" ]; then
+        log_state="mtime=${current_mtime}, size=${current_size}"
+      fi
+      log "[wait] Апгрейд всё ещё идёт (ожидание $(format_duration "$elapsed")); gitlab-ctl: $([ "$ctl_ok" -eq 1 ] && echo OK || echo FAIL); reconfigure.log: ${log_state}; тишина ${since_growth}s"
+      last_report=$elapsed
+    fi
+
+    if [ "$ctl_ok" -eq 1 ] && [ "$quiet_enough" -eq 1 ]; then
+      if [ $((current_time - last_ready_attempt)) -lt "$ready_retry_delay" ]; then
+        continue
+      fi
+      last_ready_attempt=$current_time
+      if wait_gitlab_ready; then
+        ok "Апгрейд завершён: службы в норме и HTTP доступен"
+        return 0
+      fi
+      warn "GitLab ещё не готов после reconfigure — продолжаю ожидание"
+    fi
+
+    if [ "$timeout" -gt 0 ] && [ "$elapsed" -ge "$timeout" ]; then
+      err "Апгрейд не завершился за $(format_duration "$timeout")"
+      report_basic_health "после ожидания завершения апгрейда"
+      return 1
+    fi
+
+    sleep "$poll_interval"
+  done
 }

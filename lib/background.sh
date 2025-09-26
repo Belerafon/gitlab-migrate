@@ -21,6 +21,14 @@ BACKGROUND_LEGACY_QUEUE_RC=0
 BACKGROUND_LEGACY_QUEUE_ERROR=""
 BACKGROUND_LEGACY_QUEUE_COUNT=""
 BACKGROUND_LEGACY_QUEUE_TRACKED=""
+BACKGROUND_STATUS_TASK_SUPPORTED=0
+BACKGROUND_STATUS_TASK_RC=0
+BACKGROUND_STATUS_TASK_ERROR=""
+BACKGROUND_STATUS_TASK_LAST_OUTPUT=""
+BACKGROUND_STATUS_TASK_PENDING_TOTAL=0
+BACKGROUND_STATUS_TASK_DETAILS=""
+BACKGROUND_STATUS_TASK_BLOCKED=0
+BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
 
 indent_with_prefix() {
   local prefix="${1:-      }"
@@ -689,6 +697,142 @@ background_migrations_extra_diagnostics() {
   background_print_manual_hints "$inner"
 }
 
+# Современные версии GitLab предоставляют rake-задачу gitlab:background_migrations:status.
+# На старых релизах она может отсутствовать, поэтому функция возвращает код 2 и
+# вызывающий код использует прежние проверки по базе.
+background_collect_pending_status_task() {
+  BACKGROUND_STATUS_TASK_SUPPORTED=0
+  BACKGROUND_STATUS_TASK_RC=0
+  BACKGROUND_STATUS_TASK_ERROR=""
+  BACKGROUND_STATUS_TASK_LAST_OUTPUT=""
+  BACKGROUND_STATUS_TASK_PENDING_TOTAL=0
+  BACKGROUND_STATUS_TASK_DETAILS=""
+  BACKGROUND_STATUS_TASK_BLOCKED=0
+  BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
+
+  if ! gitlab_rake_available; then
+    BACKGROUND_STATUS_TASK_RC=127
+    BACKGROUND_STATUS_TASK_ERROR="${GITLAB_RAKE_ERROR:-Команда gitlab-rake недоступна}"
+    return 1
+  fi
+
+  background_load_rake_tasks
+  if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ]; then
+    BACKGROUND_STATUS_TASK_RC="${BACKGROUND_RAKE_TASKS_RC:-1}"
+    BACKGROUND_STATUS_TASK_ERROR="${BACKGROUND_RAKE_TASKS_ERROR:-Не удалось получить список rake-задач}"
+    return 1
+  fi
+
+  if ! background_rake_task_exists "gitlab:background_migrations:status"; then
+    BACKGROUND_STATUS_TASK_RC=2
+    return 2
+  fi
+
+  BACKGROUND_STATUS_TASK_SUPPORTED=1
+
+  local output
+  if output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
+    BACKGROUND_STATUS_TASK_RC=0
+  else
+    BACKGROUND_STATUS_TASK_RC=$?
+  fi
+
+  BACKGROUND_STATUS_TASK_LAST_OUTPUT="$output"
+
+  if [ "${BACKGROUND_STATUS_TASK_RC}" -ne 0 ]; then
+    BACKGROUND_STATUS_TASK_ERROR="$output"
+    return 1
+  fi
+
+  local current_db=""
+  local line trimmed status_key display_line
+  local pending_total=0
+  local -A status_counts=()
+  local -a status_lines=()
+  local -a blocker_lines=()
+
+  while IFS= read -r line; do
+    line="$(printf '%s' "$line" | tr -d '\r')"
+    trimmed="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -z "$trimmed" ] && continue
+
+    case "$trimmed" in
+      Database:*)
+        current_db="${trimmed#Database:}"
+        current_db="$(printf '%s' "$current_db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        continue
+        ;;
+      There\ are\ no\ background\ migrations*|There\ are\ no\ queued*|All\ background\ migrations*)
+        continue
+        ;;
+    esac
+
+    if [[ "$trimmed" =~ ^[-+|]+$ ]]; then
+      continue
+    fi
+
+    if [[ "$line" != *'|'* ]]; then
+      continue
+    fi
+
+    status_key="$(printf '%s' "$line" | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    [ -z "$status_key" ] && continue
+
+    case "$status_key" in
+      status|finished|succeeded|complete|completed|finalized)
+        continue
+        ;;
+    esac
+
+    pending_total=$((pending_total + 1))
+    status_counts["$status_key"]=$(( ${status_counts[$status_key]:-0} + 1 ))
+
+    display_line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:blank:]' ' ')"
+    if [ -n "$current_db" ]; then
+      display_line="[${current_db}] ${display_line}"
+    fi
+    status_lines+=("$display_line")
+
+    case "$status_key" in
+      failed|halted|errored|blocked|stuck|paused)
+        blocker_lines+=("$display_line")
+        ;;
+    esac
+  done <<< "$output"
+
+  BACKGROUND_STATUS_TASK_PENDING_TOTAL=$pending_total
+
+  if [ "$pending_total" -gt 0 ]; then
+    local detail_line="gitlab:background_migrations:status (миграции): ${pending_total}"
+    if [ ${#status_counts[@]} -gt 0 ]; then
+      detail_line+=$'\n'"  Разбивка по статусам:"
+      while IFS= read -r status_name; do
+        [ -z "$status_name" ] && continue
+        detail_line+=$'\n'"    - ${status_name}: ${status_counts[$status_name]}"
+      done < <(printf '%s\n' "${!status_counts[@]}" | sort)
+    fi
+    if [ ${#status_lines[@]} -gt 0 ]; then
+      detail_line+=$'\n'"  Строки статуса:"
+      for display_line in "${status_lines[@]}"; do
+        detail_line+=$'\n'"    - ${display_line}"
+      done
+    fi
+    BACKGROUND_STATUS_TASK_DETAILS="$detail_line"
+  else
+    BACKGROUND_STATUS_TASK_DETAILS=""
+  fi
+
+  if [ ${#blocker_lines[@]} -gt 0 ]; then
+    BACKGROUND_STATUS_TASK_BLOCKED=1
+    BACKGROUND_STATUS_TASK_BLOCKER_MSG=$(printf '%s\n' "${blocker_lines[@]}")
+  else
+    BACKGROUND_STATUS_TASK_BLOCKED=0
+    BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
+  fi
+
+  return 0
+}
+
 background_print_stale_warnings() {
   local indent="${1:-    }"
 
@@ -727,10 +871,20 @@ background_migrations_status_report() {
     return 0
   fi
 
-  if status_output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
+  if [ "${BACKGROUND_STATUS_TASK_SUPPORTED:-0}" -eq 1 ] && [ "${BACKGROUND_STATUS_TASK_RC:-1}" -eq 0 ] && [ -n "${BACKGROUND_STATUS_TASK_LAST_OUTPUT:-}" ]; then
+    status_output="${BACKGROUND_STATUS_TASK_LAST_OUTPUT}"
     status_rc=0
+  elif status_output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
+    status_rc=0
+    BACKGROUND_STATUS_TASK_LAST_OUTPUT="$status_output"
+    BACKGROUND_STATUS_TASK_RC=0
+    BACKGROUND_STATUS_TASK_SUPPORTED=1
   else
     status_rc=$?
+    BACKGROUND_STATUS_TASK_RC=$status_rc
+    BACKGROUND_STATUS_TASK_SUPPORTED=1
+    BACKGROUND_STATUS_TASK_LAST_OUTPUT="$status_output"
+    BACKGROUND_STATUS_TASK_ERROR="$status_output"
   fi
 
   if [ $status_rc -eq 0 ]; then
@@ -936,6 +1090,30 @@ background_collect_pending() {
     else
       BACKGROUND_PENDING_LEGACY_STALE="$legacy_pending_count"
       BACKGROUND_PENDING_LEGACY_STALE_DETAILS="$legacy_detail_line"
+    fi
+  fi
+
+  local rake_rc rake_pending blocker_message
+  if background_collect_pending_status_task; then
+    rake_pending="${BACKGROUND_STATUS_TASK_PENDING_TOTAL:-0}"
+    if [ "$rake_pending" -gt 0 ] && [ -n "${BACKGROUND_STATUS_TASK_DETAILS:-}" ]; then
+      detail_lines+=("${BACKGROUND_STATUS_TASK_DETAILS}")
+      if [ "$rake_pending" -gt "$total" ]; then
+        total="$rake_pending"
+      fi
+    fi
+    if [ "${BACKGROUND_STATUS_TASK_BLOCKED:-0}" -eq 1 ] && [ -n "${BACKGROUND_STATUS_TASK_BLOCKER_MSG:-}" ]; then
+      blocker_message="gitlab:background_migrations:status сообщает о проблемных миграциях:"$'\n'"${BACKGROUND_STATUS_TASK_BLOCKER_MSG}"
+      background_append_blocker "$blocker_message"
+    fi
+  else
+    rake_rc=$?
+    if [ "${BACKGROUND_STATUS_TASK_RC:-$rake_rc}" -ne 2 ]; then
+      if [ -n "${BACKGROUND_STATUS_TASK_ERROR:-}" ]; then
+        background_append_error_msg "gitlab:background_migrations:status: ${BACKGROUND_STATUS_TASK_ERROR}"
+      else
+        background_append_error_msg "gitlab:background_migrations:status завершилась с ошибкой (rc=${BACKGROUND_STATUS_TASK_RC:-$rake_rc})"
+      fi
     fi
   fi
 

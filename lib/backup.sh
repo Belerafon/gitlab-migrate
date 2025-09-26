@@ -390,7 +390,10 @@ restore_backup_if_needed() {
   fi
 
   log "[>] Проверка готовности всех служб перед восстановлением…"
-  wait_gitlab_ready
+  if ! wait_gitlab_ready; then
+    err "GitLab не готов к восстановлению из бэкапа"
+    exit 1
+  fi
   wait_postgres_ready
   wait_container_health
   check_backup_versions
@@ -400,7 +403,10 @@ restore_backup_if_needed() {
   dexec 'update-permissions' >/dev/null 2>&1 || warn "update-permissions после fix_owners завершился с ошибкой"
   log "[>] Применение новых прав (gitlab-ctl reconfigure)…"
   run_reconfigure || exit 1
-  wait_gitlab_ready
+  if ! wait_gitlab_ready; then
+    err "GitLab не поднялся после reconfigure перед восстановлением"
+    exit 1
+  fi
   wait_postgres_ready
 
   log "[>] Проверка свободного места перед восстановлением…"
@@ -467,7 +473,10 @@ restore_backup_if_needed() {
         sleep "$WAIT_AFTER_START"
       fi
 
-      wait_gitlab_ready
+      if ! wait_gitlab_ready; then
+        err "GitLab не восстановился после неудачной попытки восстановления"
+        exit 1
+      fi
       wait_postgres_ready
 
       if [ $restore_attempt -eq $max_attempts ]; then
@@ -503,7 +512,10 @@ verify_restore_success() {
   sleep 30
 
   # Wait for GitLab and PostgreSQL to be ready
-  wait_gitlab_ready
+  if ! wait_gitlab_ready; then
+    err "GitLab не поднялся после запуска служб"
+    exit 1
+  fi
   wait_postgres_ready
 
   # Explicitly check critical services

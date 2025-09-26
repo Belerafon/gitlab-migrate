@@ -98,7 +98,10 @@ main() {
 
   ensure_permissions
 
-  wait_gitlab_ready
+  if ! wait_gitlab_ready; then
+    err "GitLab не стал доступен после запуска базового контейнера"
+    exit 1
+  fi
   wait_postgres_ready
   log "[>] Версия PostgreSQL в контейнере:"
   dexec 'gitlab-psql --version 2>/dev/null || psql --version' || true
@@ -156,7 +159,10 @@ main() {
   done
 
   log "[>] Финальная проверка после всех апгрейдов…"
-  wait_gitlab_ready
+  if ! wait_gitlab_ready; then
+    err "GitLab не стал доступен после всех апгрейдов"
+    exit 1
+  fi
   wait_postgres_ready
 
   log "[>] Итоговая информация:"

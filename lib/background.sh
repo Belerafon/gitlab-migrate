@@ -29,6 +29,8 @@ BACKGROUND_STATUS_TASK_PENDING_TOTAL=0
 BACKGROUND_STATUS_TASK_DETAILS=""
 BACKGROUND_STATUS_TASK_BLOCKED=0
 BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
+BACKGROUND_STATUS_TASK_STATUS_COUNTS=""
+BACKGROUND_STATUS_TASK_ITEM_LINES=""
 
 background_output_indicates_missing_task() {
   local output
@@ -729,6 +731,8 @@ background_collect_pending_status_task() {
   BACKGROUND_STATUS_TASK_DETAILS=""
   BACKGROUND_STATUS_TASK_BLOCKED=0
   BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
+  BACKGROUND_STATUS_TASK_STATUS_COUNTS=""
+  BACKGROUND_STATUS_TASK_ITEM_LINES=""
 
   if ! gitlab_rake_available; then
     BACKGROUND_STATUS_TASK_RC=127
@@ -822,21 +826,18 @@ background_collect_pending_status_task() {
   BACKGROUND_STATUS_TASK_PENDING_TOTAL=$pending_total
 
   if [ "$pending_total" -gt 0 ]; then
-    local detail_line="gitlab:background_migrations:status (миграции): ${pending_total}"
     if [ ${#status_counts[@]} -gt 0 ]; then
-      detail_line+=$'\n'"  Разбивка по статусам:"
+      local counts_lines=""
       while IFS= read -r status_name; do
         [ -z "$status_name" ] && continue
-        detail_line+=$'\n'"    - ${status_name}: ${status_counts[$status_name]}"
+        counts_lines+="${status_name}=${status_counts[$status_name]}"$'\n'
       done < <(printf '%s\n' "${!status_counts[@]}" | sort)
+      BACKGROUND_STATUS_TASK_STATUS_COUNTS="${counts_lines%$'\n'}"
     fi
     if [ ${#status_lines[@]} -gt 0 ]; then
-      detail_line+=$'\n'"  Строки статуса:"
-      for display_line in "${status_lines[@]}"; do
-        detail_line+=$'\n'"    - ${display_line}"
-      done
+      BACKGROUND_STATUS_TASK_ITEM_LINES=$(printf '%s\n' "${status_lines[@]}")
     fi
-    BACKGROUND_STATUS_TASK_DETAILS="$detail_line"
+    BACKGROUND_STATUS_TASK_DETAILS="gitlab:background_migrations:status (миграции): ${pending_total}"
   else
     BACKGROUND_STATUS_TASK_DETAILS=""
   fi
@@ -877,10 +878,52 @@ background_migrations_status_report() {
   if background_collect_pending_status_task; then
     status_output="${BACKGROUND_STATUS_TASK_LAST_OUTPUT:-}"
     log "${indent}- gitlab:background_migrations:status:"
-    if [[ -n "${status_output//[[:space:]]/}" ]]; then
-      printf '%s\n' "$status_output" | indent_with_prefix "$sub"
+    if [ "${BACKGROUND_STATUS_TASK_PENDING_TOTAL:-0}" -le 0 ]; then
+      log "${sub}Незавершённых фоновых миграций не обнаружено"
     else
-      log "${sub}(команда не вернула вывода)"
+      log "${sub}Незавершённых миграций: ${BACKGROUND_STATUS_TASK_PENDING_TOTAL}"
+
+      if [ -n "${BACKGROUND_STATUS_TASK_STATUS_COUNTS:-}" ]; then
+        log "${sub}Разбивка по статусам:"
+        while IFS='=' read -r status_name status_count; do
+          [ -z "$status_name" ] && continue
+          log "${sub}  - ${status_name}: ${status_count}"
+        done <<< "$(printf '%s\n' "${BACKGROUND_STATUS_TASK_STATUS_COUNTS}")"
+      fi
+
+      if [ -n "${BACKGROUND_STATUS_TASK_ITEM_LINES:-}" ]; then
+        local max_lines=${BACKGROUND_STATUS_MAX_DETAILS:-10}
+        local displayed=0
+        local total_lines=0
+        while IFS= read -r _; do
+          total_lines=$((total_lines + 1))
+        done <<< "$(printf '%s\n' "${BACKGROUND_STATUS_TASK_ITEM_LINES}")"
+
+        if [ "$max_lines" -lt 0 ]; then
+          max_lines=$total_lines
+        fi
+
+        if [ "$max_lines" -gt 0 ]; then
+          local display_limit=$max_lines
+          if [ "$display_limit" -gt "$total_lines" ]; then
+            display_limit=$total_lines
+          fi
+
+          log "${sub}Задачи (первые ${display_limit} из ${total_lines}):"
+          while IFS= read -r display_line; do
+            [ -z "$display_line" ] && continue
+            displayed=$((displayed + 1))
+            if [ "$displayed" -gt "$max_lines" ]; then
+              break
+            fi
+            log "${sub}  - ${display_line}"
+          done <<< "$(printf '%s\n' "${BACKGROUND_STATUS_TASK_ITEM_LINES}")"
+        fi
+
+        if [ "$displayed" -lt "$total_lines" ]; then
+          log "${sub}(Полный вывод доступен через gitlab-rake gitlab:background_migrations:status)"
+        fi
+      fi
     fi
     return 0
   fi

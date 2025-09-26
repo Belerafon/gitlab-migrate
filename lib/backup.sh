@@ -568,7 +568,7 @@ verify_restore_success() {
       fi
     else
       if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ] && [ -n "${BACKGROUND_RAKE_TASKS_ERROR:-}" ]; then
-        warn "Не удалось получить список rake-задач (gitlab-rake -T завершился с кодом ${BACKGROUND_RAKE_TASKS_RC})"
+        warn "Не удалось получить список rake-задач (gitlab-rake -AT/-T завершился с кодом ${BACKGROUND_RAKE_TASKS_RC})"
         printf '%s\n' "${BACKGROUND_RAKE_TASKS_ERROR}" | indent_with_prefix "    "
       else
         log "    - Задача gitlab:db:abort_if_pending_migrations недоступна в этой версии GitLab"

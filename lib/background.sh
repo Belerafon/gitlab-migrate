@@ -30,6 +30,19 @@ BACKGROUND_STATUS_TASK_DETAILS=""
 BACKGROUND_STATUS_TASK_BLOCKED=0
 BACKGROUND_STATUS_TASK_BLOCKER_MSG=""
 
+background_output_indicates_missing_task() {
+  local output
+  output="$(printf '%s' "${1:-}" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+
+  case "$output" in
+    *"don't know how to build task"*|*"could not find task"*|*"doesn't appear to be a task"*|*"unknown rake task"*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 indent_with_prefix() {
   local prefix="${1:-      }"
   sed "s/^/${prefix}/"
@@ -170,15 +183,22 @@ background_load_rake_tasks() {
   local output rc
 
   if gitlab_rake_available; then
-    if output=$(gitlab_rake -T 2>/dev/null); then
+    if output=$(gitlab_rake -AT 2>/dev/null); then
       BACKGROUND_RAKE_TASKS_CACHE="$output"
       BACKGROUND_RAKE_TASKS_ERROR=""
       BACKGROUND_RAKE_TASKS_RC=0
     else
       rc=$?
-      BACKGROUND_RAKE_TASKS_CACHE=""
-      BACKGROUND_RAKE_TASKS_ERROR="$output"
-      BACKGROUND_RAKE_TASKS_RC=$rc
+      if output=$(gitlab_rake -T 2>/dev/null); then
+        BACKGROUND_RAKE_TASKS_CACHE="$output"
+        BACKGROUND_RAKE_TASKS_ERROR=""
+        BACKGROUND_RAKE_TASKS_RC=0
+      else
+        rc=$?
+        BACKGROUND_RAKE_TASKS_CACHE=""
+        BACKGROUND_RAKE_TASKS_ERROR="$output"
+        BACKGROUND_RAKE_TASKS_RC=$rc
+      fi
     fi
   else
     BACKGROUND_RAKE_TASKS_CACHE=""
@@ -201,7 +221,7 @@ background_rake_task_exists() {
     return 1
   fi
 
-  if printf '%s\n' "${BACKGROUND_RAKE_TASKS_CACHE}" | awk '{print $1}' | grep -Fxq "$task"; then
+  if printf '%s\n' "${BACKGROUND_RAKE_TASKS_CACHE}" | awk '{if($1=="rake" && NF>=2){print $2} else {print $1}}' | grep -Fxq "$task"; then
     return 0
   fi
 
@@ -530,7 +550,7 @@ background_print_pending_task() {
     fi
   else
     if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ] && [ -n "${BACKGROUND_RAKE_TASKS_ERROR:-}" ]; then
-      log "${indent}- Не удалось получить список задач rake (gitlab-rake -T):"
+      log "${indent}- Не удалось получить список задач rake (gitlab-rake -AT/-T):"
       printf '%s\n' "${BACKGROUND_RAKE_TASKS_ERROR}" | indent_with_prefix "${indent}  "
     else
       log "${indent}- Задача gitlab:background_migrations:pending недоступна в этой версии GitLab"
@@ -716,33 +736,32 @@ background_collect_pending_status_task() {
     return 1
   fi
 
-  background_load_rake_tasks
-  if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ]; then
-    BACKGROUND_STATUS_TASK_RC="${BACKGROUND_RAKE_TASKS_RC:-1}"
-    BACKGROUND_STATUS_TASK_ERROR="${BACKGROUND_RAKE_TASKS_ERROR:-Не удалось получить список rake-задач}"
-    return 1
-  fi
-
-  if ! background_rake_task_exists "gitlab:background_migrations:status"; then
-    BACKGROUND_STATUS_TASK_RC=2
-    return 2
-  fi
-
-  BACKGROUND_STATUS_TASK_SUPPORTED=1
-
-  local output
+  local output rc normalized
   if output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
-    BACKGROUND_STATUS_TASK_RC=0
+    rc=0
   else
-    BACKGROUND_STATUS_TASK_RC=$?
+    rc=$?
   fi
 
   BACKGROUND_STATUS_TASK_LAST_OUTPUT="$output"
+  BACKGROUND_STATUS_TASK_RC=$rc
 
-  if [ "${BACKGROUND_STATUS_TASK_RC}" -ne 0 ]; then
-    BACKGROUND_STATUS_TASK_ERROR="$output"
+  normalized="$(printf '%s' "$output" | tr -d '\r')"
+
+  if [ "$rc" -ne 0 ]; then
+    if background_output_indicates_missing_task "$normalized"; then
+      BACKGROUND_STATUS_TASK_SUPPORTED=0
+      BACKGROUND_STATUS_TASK_ERROR="$normalized"
+      BACKGROUND_STATUS_TASK_RC=2
+      return 2
+    fi
+
+    BACKGROUND_STATUS_TASK_SUPPORTED=1
+    BACKGROUND_STATUS_TASK_ERROR="$normalized"
     return 1
   fi
+
+  BACKGROUND_STATUS_TASK_SUPPORTED=1
 
   local current_db=""
   local line trimmed status_key display_line
@@ -853,42 +872,11 @@ background_print_stale_warnings() {
 background_migrations_status_report() {
   local indent="${1:-}"
   local sub="${indent}  "
-  local status_output status_rc
+  local status_output status_rc attempt_rc
 
-  background_load_rake_tasks
-
-  if [ "${BACKGROUND_RAKE_TASKS_RC:-0}" -ne 0 ]; then
-    warn "Не удалось получить список rake-задач (gitlab-rake -T завершился с кодом ${BACKGROUND_RAKE_TASKS_RC})"
-    if [ -n "${BACKGROUND_RAKE_TASKS_ERROR:-}" ]; then
-      log "${indent}- Вывод gitlab-rake -T:"
-      printf '%s\n' "${BACKGROUND_RAKE_TASKS_ERROR}" | indent_with_prefix "$sub"
-    fi
-    return 1
-  fi
-
-  if ! background_rake_task_exists "gitlab:background_migrations:status"; then
-    log "${indent}- Задача gitlab:background_migrations:status недоступна в этой версии GitLab"
-    return 0
-  fi
-
-  if [ "${BACKGROUND_STATUS_TASK_SUPPORTED:-0}" -eq 1 ] && [ "${BACKGROUND_STATUS_TASK_RC:-1}" -eq 0 ] && [ -n "${BACKGROUND_STATUS_TASK_LAST_OUTPUT:-}" ]; then
-    status_output="${BACKGROUND_STATUS_TASK_LAST_OUTPUT}"
-    status_rc=0
-  elif status_output=$(gitlab_rake gitlab:background_migrations:status 2>&1); then
-    status_rc=0
-    BACKGROUND_STATUS_TASK_LAST_OUTPUT="$status_output"
-    BACKGROUND_STATUS_TASK_RC=0
-    BACKGROUND_STATUS_TASK_SUPPORTED=1
-  else
-    status_rc=$?
-    BACKGROUND_STATUS_TASK_RC=$status_rc
-    BACKGROUND_STATUS_TASK_SUPPORTED=1
-    BACKGROUND_STATUS_TASK_LAST_OUTPUT="$status_output"
-    BACKGROUND_STATUS_TASK_ERROR="$status_output"
-  fi
-
-  if [ $status_rc -eq 0 ]; then
-    log "${indent}- gitlab:background_migrations:status:";
+  if background_collect_pending_status_task; then
+    status_output="${BACKGROUND_STATUS_TASK_LAST_OUTPUT:-}"
+    log "${indent}- gitlab:background_migrations:status:"
     if [[ -n "${status_output//[[:space:]]/}" ]]; then
       printf '%s\n' "$status_output" | indent_with_prefix "$sub"
     else
@@ -896,6 +884,27 @@ background_migrations_status_report() {
     fi
     return 0
   fi
+
+  attempt_rc=$?
+  status_rc="${BACKGROUND_STATUS_TASK_RC:-$attempt_rc}"
+  status_output="${BACKGROUND_STATUS_TASK_LAST_OUTPUT:-}"
+
+  case "$status_rc" in
+    2)
+      log "${indent}- Задача gitlab:background_migrations:status недоступна в этой версии GitLab"
+      if [ -n "${BACKGROUND_STATUS_TASK_ERROR:-}" ]; then
+        printf '%s\n' "${BACKGROUND_STATUS_TASK_ERROR}" | indent_with_prefix "$sub"
+      fi
+      return 0
+      ;;
+    127)
+      warn "Команда gitlab-rake недоступна (gitlab:background_migrations:status)"
+      if [ -n "${BACKGROUND_STATUS_TASK_ERROR:-}" ]; then
+        printf '%s\n' "${BACKGROUND_STATUS_TASK_ERROR}" | indent_with_prefix "$sub"
+      fi
+      return 1
+      ;;
+  esac
 
   warn "Задача gitlab:background_migrations:status завершилась с ошибкой (код ${status_rc})"
   if [ -n "$status_output" ]; then

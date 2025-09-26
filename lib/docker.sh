@@ -932,9 +932,27 @@ wait_gitlab_ready() {
     fi
 
     if [ "${http_progress}" -gt 0 ] && [ $((http_waited - http_last_report)) -ge "${http_progress}" ]; then
-      local waited_fmt
+      local waited_fmt reason_msg
       waited_fmt=$(format_duration "$http_waited")
-      log "    …HTTP ещё не готов (ожидание ${waited_fmt}); контейнер: ${container_status:-недоступен}; хост: ${host_status:-недоступен}" \
+
+      if [ "$container_ready_since" -gt 0 ] && [ "$host_ready_since" -gt 0 ]; then
+        local stable_elapsed stable_left earliest_ready
+        earliest_ready="$container_ready_since"
+        if [ "$host_ready_since" -lt "$earliest_ready" ]; then
+          earliest_ready="$host_ready_since"
+        fi
+        stable_elapsed=$((now - earliest_ready))
+        if [ "$stable_elapsed" -lt "$http_stable_window" ]; then
+          stable_left=$((http_stable_window - stable_elapsed))
+          reason_msg="ожидание стабильности ещё $(format_duration "$stable_left") из $(format_duration "$http_stable_window")"
+        else
+          reason_msg="ожидание стабильности"
+        fi
+      else
+        reason_msg="ожидание готовности HTTP"
+      fi
+
+      log "    …HTTP ещё не готов (${reason_msg}; общее ожидание ${waited_fmt}); контейнер: ${container_status:-недоступен}; хост: ${host_status:-недоступен}" \
         " (статус контейнера: $(container_status_summary))"
       http_last_report=$http_waited
     fi

@@ -6,6 +6,9 @@ declare -A UPGRADE_SERIES_REQUIREMENT=()
 declare -A UPGRADE_SERIES_FLAGS=()
 declare -A UPGRADE_SERIES_NOTES=()
 declare -a UPGRADE_SKIPPED_OPTIONALS=()
+declare -A POSTGRES_MIN_VERSION_BY_SERIES=()
+declare -A POSTGRES_MIN_VERSION_BY_MAJOR=()
+declare -A POSTGRES_REQUIREMENT_NOTES=()
 
 register_upgrade_series() {
   local series="$1" patch="$2" requirement="$3" flags="$4" note="$5"
@@ -42,6 +45,86 @@ done <<'EOF'
 17.8|17.8.7-ce.0|required||Обязательный стоп 17.8
 17.11|17.11.7-ce.0|required||Финальный релиз 17.x на момент подготовки
 EOF
+
+register_postgres_requirement() {
+  local scope="$1" min_pg="$2" note="$3"
+
+  if [[ "$scope" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    POSTGRES_MIN_VERSION_BY_SERIES["$scope"]="$min_pg"
+    POSTGRES_REQUIREMENT_NOTES["$scope"]="$note"
+    return 0
+  fi
+
+  if [[ "$scope" =~ ^[0-9]+$ ]]; then
+    POSTGRES_MIN_VERSION_BY_MAJOR["$scope"]="$min_pg"
+    POSTGRES_REQUIREMENT_NOTES["$scope"]="$note"
+    return 0
+  fi
+
+  err "Некорректный идентификатор серии PostgreSQL: $scope"
+  exit 1
+}
+
+while IFS='|' read -r scope min_pg note; do
+  [[ -z "$scope" ]] && continue
+  [[ "$scope" = \#* ]] && continue
+  register_postgres_requirement "$scope" "$min_pg" "$note"
+done <<'EOF'
+# scope|min_pg|note
+# Минимальные версии основаны на официальной документации GitLab и релиз-нотах.
+14.0|12|GitLab 14.0 требует PostgreSQL 12 для pg-upgrade
+15.11|13|GitLab 15.11 фиксирует переход на PostgreSQL 13
+16.11|14|GitLab 16.11 фиксирует переход на PostgreSQL 14
+17|14|GitLab 17.x удаляет бинарники PostgreSQL 13 и требует минимум 14 (см. https://docs.gitlab.com/ee/update/versions/gitlab_17_changes.html#linux-package-installations)
+EOF
+
+required_postgres_major_for_series() {
+  local series="$1" major
+
+  if [ -z "$series" ]; then
+    printf ''
+    return 0
+  fi
+
+  major="${series%%.*}"
+
+  if [[ -n "${POSTGRES_MIN_VERSION_BY_SERIES[$series]:-}" ]]; then
+    printf '%s' "${POSTGRES_MIN_VERSION_BY_SERIES[$series]}"
+    return 0
+  fi
+
+  if [[ -n "${POSTGRES_MIN_VERSION_BY_MAJOR[$major]:-}" ]]; then
+    printf '%s' "${POSTGRES_MIN_VERSION_BY_MAJOR[$major]}"
+    return 0
+  fi
+
+  printf ''
+}
+
+postgres_requirement_note_for_series() {
+  local series="$1" major note=""
+
+  if [ -z "$series" ]; then
+    printf ''
+    return 0
+  fi
+
+  major="${series%%.*}"
+
+  note="${POSTGRES_REQUIREMENT_NOTES[$series]:-}"
+  if [ -n "$note" ]; then
+    printf '%s' "$note"
+    return 0
+  fi
+
+  note="${POSTGRES_REQUIREMENT_NOTES[$major]:-}"
+  if [ -n "$note" ]; then
+    printf '%s' "$note"
+    return 0
+  fi
+
+  printf ''
+}
 
 # Function to get the latest patch version for a given series
 latest_patch_tag() {
@@ -293,7 +376,11 @@ prompt_snapshot_after_upgrade() {
 ensure_postgres_at_least() {
   local required="$1" series="$2"
   log "[>] Проверка версии PostgreSQL перед переходом на ${series}"
-  local pg_ver pg_major data_pg_ver data_pg_major old_bin_dir
+  local pg_ver pg_major data_pg_ver data_pg_major old_bin_dir requirement_note
+  requirement_note="$(postgres_requirement_note_for_series "$series")"
+  if [ -n "$requirement_note" ]; then
+    log "  требование: ${requirement_note}"
+  fi
   pg_ver=$(dexec 'gitlab-psql --version' 2>/dev/null | awk '{print $3}')
   pg_major="${pg_ver%%.*}"
   old_bin_dir="/opt/gitlab/embedded/postgresql/${pg_major}/bin"
@@ -337,12 +424,20 @@ ensure_postgres_at_least() {
     done <<< "$available_bins"
 
     if [ -z "$new_pg_major" ]; then
-      err "После reconfigure не найдена новая версия PostgreSQL (ожидалась >= ${required}). Каталоги: ${formatted_bins}"
+      if [ -n "$requirement_note" ]; then
+        err "После reconfigure не найдена новая версия PostgreSQL (ожидалась >= ${required}). ${requirement_note}. Каталоги: ${formatted_bins}"
+      else
+        err "После reconfigure не найдена новая версия PostgreSQL (ожидалась >= ${required}). Каталоги: ${formatted_bins}"
+      fi
       exit 1
     fi
 
     if [ "$new_pg_major" -lt "$required" ]; then
-      err "Доступная версия PostgreSQL ${new_pg_major} меньше требуемой ${required}."
+      if [ -n "$requirement_note" ]; then
+        err "Доступная версия PostgreSQL ${new_pg_major} меньше требуемой ${required}. ${requirement_note}."
+      else
+        err "Доступная версия PostgreSQL ${new_pg_major} меньше требуемой ${required}."
+      fi
       exit 1
     fi
 
@@ -392,56 +487,36 @@ ensure_postgres_at_least() {
 }
 
 upgrade_to_series() {
-  local series="$1" target required_pg="" major
-  major="${series%%.*}"
+  local series="$1" target required_pg=""
 
-  case "$major" in
-    14)
-      if [ "$series" = "14.0" ]; then
-        required_pg=12
-      fi
-      ;;
-    15)
-      if [ "$series" = "15.11" ]; then
-        required_pg=13
-      fi
-      ;;
-    16)
-      if [ "$series" = "16.11" ]; then
-        required_pg=14
-      fi
-      ;;
-    17)
-      required_pg=15
-      ;;
-  esac
+  required_pg="$(required_postgres_major_for_series "$series")"
   if [[ -n "$required_pg" ]]; then
     ensure_postgres_at_least "$required_pg" "$series"
   fi
   if [[ "$series" =~ ^[0-9]+\.[0-9]+$ ]] || [[ "$series" =~ ^[0-9]+$ ]]; then
     target="$(latest_patch_tag "$series")"
-    else
-      target="$series"
-    fi
-    log "[==>] Апгрейд до gitlab/gitlab-ce:${target}"
-    docker pull "gitlab/gitlab-ce:${target}" >/dev/null 2>&1 || warn "pull не обязателен, продолжу"
-    run_container "$target"
-    if ! wait_gitlab_ready; then
-      err "GitLab не стал доступен после запуска образа ${target}"
-      exit 1
-    fi
-    wait_postgres_ready
-    if ! wait_upgrade_completion; then
-      err "Обновление до ${target} не завершилось корректно"
-      exit 1
-    fi
-    report_basic_health "после апгрейда до ${target}"
+  else
+    target="$series"
+  fi
+  log "[==>] Апгрейд до gitlab/gitlab-ce:${target}"
+  docker pull "gitlab/gitlab-ce:${target}" >/dev/null 2>&1 || warn "pull не обязателен, продолжу"
+  run_container "$target"
+  if ! wait_gitlab_ready; then
+    err "GitLab не стал доступен после запуска образа ${target}"
+    exit 1
+  fi
+  wait_postgres_ready
+  if ! wait_upgrade_completion; then
+    err "Обновление до ${target} не завершилось корректно"
+    exit 1
+  fi
+  report_basic_health "после апгрейда до ${target}"
 
-    log "[>] Проверка миграций схемы:"
-    local ms_output up_count down_count
-    ms_output=$(gitlab_rake db:migrate:status 2>/dev/null || true)
-    up_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*up' || true)
-    down_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*down' || true)
+  log "[>] Проверка миграций схемы:"
+  local ms_output up_count down_count
+  ms_output=$(gitlab_rake db:migrate:status 2>/dev/null || true)
+  up_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*up' || true)
+  down_count=$(printf '%s\n' "$ms_output" | grep -cE '^\s*down' || true)
 
     if [ "$down_count" -gt 0 ]; then
       log "  есть неприменённые миграции"

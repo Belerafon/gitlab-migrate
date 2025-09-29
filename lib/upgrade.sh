@@ -78,6 +78,66 @@ done <<'EOF'
 17|14|GitLab 17.x удаляет бинарники PostgreSQL 13 и требует минимум 14 (см. https://docs.gitlab.com/ee/update/versions/gitlab_17_changes.html#linux-package-installations)
 EOF
 
+log_postgres_diagnostics() {
+  local pg_ver="$1" data_pg_ver="$2" old_bin_dir="$3" new_bin_dir="$4"
+  local output
+
+  log "  диагностическая информация PostgreSQL:"
+  if [ -n "$pg_ver" ]; then
+    log "    - Текущая версия бинарников: ${pg_ver}"
+  fi
+  if [ -n "$data_pg_ver" ]; then
+    log "    - Версия данных каталога: ${data_pg_ver}"
+  fi
+  if [ -n "$old_bin_dir" ]; then
+    log "    - Используемый путь бинарников: ${old_bin_dir}"
+  fi
+  if [ -n "$new_bin_dir" ]; then
+    log "    - Новый путь бинарников: ${new_bin_dir}"
+  fi
+
+  log "    - содержимое /var/opt/gitlab/postgresql:"
+  if output=$(dexec 'ls -al /var/opt/gitlab/postgresql' 2>/dev/null); then
+    while IFS= read -r line; do
+      log "      ${line}"
+    done <<<"$output"
+  else
+    log "      (недоступно)"
+  fi
+
+  log "    - содержимое /var/opt/gitlab/postgresql/data:"
+  if output=$(dexec 'ls -al /var/opt/gitlab/postgresql/data' 2>/dev/null); then
+    while IFS= read -r line; do
+      log "      ${line}"
+    done <<<"$output"
+  else
+    log "      (недоступно)"
+  fi
+
+  log "    - доступные каталоги бинарников:"
+  if output=$(dexec 'ls -1 /opt/gitlab/embedded/postgresql' 2>/dev/null); then
+    while IFS= read -r line; do
+      log "      ${line}"
+    done <<<"$output"
+  else
+    log "      (недоступно)"
+  fi
+
+  if dexec 'command -v pg_controldata >/dev/null 2>&1'; then
+    if output=$(dexec 'pg_controldata /var/opt/gitlab/postgresql/data 2>/dev/null' 2>/dev/null); then
+      log "    - pg_controldata:"
+      local __pg_line_count=0
+      while IFS= read -r line; do
+        log "      ${line}"
+        __pg_line_count=$((__pg_line_count + 1))
+        if [ "$__pg_line_count" -ge 20 ]; then
+          break
+        fi
+      done <<<"$output"
+    fi
+  fi
+}
+
 required_postgres_major_for_series() {
   local series="$1" major
 
@@ -388,19 +448,10 @@ ensure_postgres_at_least() {
   data_pg_major="${data_pg_ver%%.*}"
   log "  текущая версия бинарников: ${pg_ver:-unknown}"
   log "  версия данных в каталоге: ${data_pg_ver:-unknown}"
-  log "  содержимое /var/opt/gitlab/postgresql:"
-  dexec 'ls -al /var/opt/gitlab/postgresql' 2>/dev/null || true
-  log "  содержимое /var/opt/gitlab/postgresql/data:"
-  dexec 'ls -al /var/opt/gitlab/postgresql/data' 2>/dev/null || true
-  log "  доступные каталоги бинарников:"
-  dexec 'ls -1 /opt/gitlab/embedded/postgresql' 2>/dev/null || true
-  if dexec 'command -v pg_controldata >/dev/null 2>&1'; then
-    log "  pg_controldata (первые строки):"
-    dexec 'pg_controldata /var/opt/gitlab/postgresql/data 2>/dev/null | head -n 20' || true
-  fi
 
   if [[ -n "$pg_major" ]] && [[ -n "$data_pg_major" ]] && [[ "$data_pg_major" != "$pg_major" ]]; then
     err "Каталог данных /var/opt/gitlab/postgresql/data создан версией ${data_pg_ver}, а текущие бинарники ${pg_ver}. Восстанови корректный бэкап или очисти каталог перед повтором."
+    log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir"
     exit 1
   fi
 
@@ -429,6 +480,7 @@ ensure_postgres_at_least() {
       else
         err "После reconfigure не найдена новая версия PostgreSQL (ожидалась >= ${required}). Каталоги: ${formatted_bins}"
       fi
+      log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir"
       exit 1
     fi
 
@@ -438,6 +490,7 @@ ensure_postgres_at_least() {
       else
         err "Доступная версия PostgreSQL ${new_pg_major} меньше требуемой ${required}."
       fi
+      log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir" "/opt/gitlab/embedded/postgresql/${new_pg_major}/bin"
       exit 1
     fi
 
@@ -445,8 +498,16 @@ ensure_postgres_at_least() {
     log "  старый путь бинарников: ${old_bin_dir}"
     log "  новый путь бинарников: ${new_bin_dir}"
 
-    dexec "[ -d '${old_bin_dir}' ]" || { err "Не найден каталог старых бинарников: ${old_bin_dir}"; exit 1; }
-    dexec "[ -d '${new_bin_dir}' ]" || { err "Не найден каталог новых бинарников: ${new_bin_dir}"; exit 1; }
+    if ! dexec "[ -d '${old_bin_dir}' ]"; then
+      err "Не найден каталог старых бинарников: ${old_bin_dir}"
+      log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir" "$new_bin_dir"
+      exit 1
+    fi
+    if ! dexec "[ -d '${new_bin_dir}' ]"; then
+      err "Не найден каталог новых бинарников: ${new_bin_dir}"
+      log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir" "$new_bin_dir"
+      exit 1
+    fi
 
     pg_upgrade_help="$(dexec 'gitlab-ctl pg-upgrade --help' 2>/dev/null || true)"
     if printf '%s' "$pg_upgrade_help" | grep -q -- '--old-bindir'; then
@@ -472,6 +533,7 @@ ensure_postgres_at_least() {
       log "  версия данных после pg-upgrade: ${data_pg_ver:-unknown}"
       if [ "${pg_ver%%.*}" -lt "$required" ] || [ "${data_pg_ver%%.*}" -lt "$required" ]; then
         err "pg-upgrade завершился, но версия осталась ${pg_ver:-unknown} (данные ${data_pg_ver:-unknown})."
+        log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir" "$new_bin_dir"
         exit 1
       fi
       ok "PostgreSQL обновлён"
@@ -481,6 +543,7 @@ ensure_postgres_at_least() {
         err "Обнаружено несоответствие major-версий PostgreSQL. Каталог данных создан другой версией. Проверь /var/opt/gitlab/postgresql и восстанови его из корректного бэкапа или очисти перед повтором."
       fi
       err "pg-upgrade завершился с ошибкой. Лог: $pg_log_host"
+      log_postgres_diagnostics "$pg_ver" "$data_pg_ver" "$old_bin_dir" "$new_bin_dir"
       exit 1
     fi
   fi

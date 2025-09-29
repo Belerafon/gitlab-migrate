@@ -9,6 +9,7 @@ declare -a UPGRADE_SKIPPED_OPTIONALS=()
 declare -A POSTGRES_MIN_VERSION_BY_SERIES=()
 declare -A POSTGRES_MIN_VERSION_BY_MAJOR=()
 declare -A POSTGRES_REQUIREMENT_NOTES=()
+__TARGET_VERSION_CUTOFF=""
 
 register_upgrade_series() {
   local series="$1" patch="$2" requirement="$3" flags="$4" note="$5"
@@ -44,6 +45,9 @@ done <<'EOF'
 17.5|17.5.5-ce.0|required||Обязательный стоп 17.5
 17.8|17.8.7-ce.0|required||Обязательный стоп 17.8
 17.11|17.11.7-ce.0|required||Финальный релиз 17.x на момент подготовки
+18.0|18.0.6-ce.0|required||Начальный релиз 18.x с исправлениями критичных миграций
+18.2|18.2.7-ce.0|required||Обязательный стоп 18.2 в соответствии с политикой x.2/x.5/x.8/x.11
+18.4|18.4.1-ce.0|required||Финальный релиз 18.x на момент подготовки
 EOF
 
 register_postgres_requirement() {
@@ -76,6 +80,7 @@ done <<'EOF'
 15.11|13|GitLab 15.11 фиксирует переход на PostgreSQL 13
 16.11|14|GitLab 16.11 фиксирует переход на PostgreSQL 14
 17|14|GitLab 17.x удаляет бинарники PostgreSQL 13 и требует минимум 14 (см. https://docs.gitlab.com/ee/update/versions/gitlab_17_changes.html#linux-package-installations)
+18|16|GitLab 18.x требует PostgreSQL 16 (рекомендуется 16.8+) — см. https://docs.gitlab.com/ee/update/versions/gitlab_18_changes.html#issues-to-be-aware-of-when-upgrading-from-1611
 EOF
 
 log_postgres_diagnostics() {
@@ -198,6 +203,86 @@ latest_patch_tag() {
   fi
 }
 
+normalize_semver_triplet() {
+  local version="$1"
+  local part idx
+  local -a raw_parts=() normalized=()
+
+  version="${version%%-ce.*}"
+  version="${version%%-ee.*}"
+  version="${version%%-*}"
+  version="${version//[$'\r\n\t ']/}"
+
+  if [ -z "$version" ]; then
+    echo "0.0.0"
+    return
+  fi
+
+  IFS='.' read -r -a raw_parts <<<"$version"
+  for idx in 0 1 2; do
+    part="${raw_parts[$idx]:-0}"
+    part="${part//[^0-9]/}"
+    if [ -z "$part" ]; then
+      part=0
+    fi
+    normalized[idx]="$part"
+  done
+
+  echo "${normalized[0]:-0}.${normalized[1]:-0}.${normalized[2]:-0}"
+}
+
+series_to_semver() {
+  local series="$1"
+  if [ -z "$series" ]; then
+    echo "0.0.0"
+    return
+  fi
+  if [[ "$series" =~ ^[0-9]+$ ]]; then
+    echo "${series}.0.0"
+    return
+  fi
+  echo "$(normalize_semver_triplet "$series")"
+}
+
+get_last_registered_series() {
+  local series last=""
+  for series in "${UPGRADE_SERIES_ORDER[@]}"; do
+    last="$series"
+  done
+  echo "$last"
+}
+
+resolve_target_version_cutoff() {
+  local raw="$1" last_series target normalized
+
+  raw="${raw//[$'\r\n\t ']/}"
+  if [ -z "$raw" ]; then
+    raw="latest"
+  fi
+
+  normalized="${raw,,}"
+
+  if [ "$normalized" = "latest" ]; then
+    last_series="$(get_last_registered_series)"
+    if [ -z "$last_series" ]; then
+      echo "0.0.0"
+      return
+    fi
+    target="$(latest_patch_tag "$last_series")"
+    echo "$(normalize_semver_triplet "$target")"
+    return
+  fi
+
+  echo "$(normalize_semver_triplet "$raw")"
+}
+
+target_version_cutoff() {
+  if [ -z "${__TARGET_VERSION_CUTOFF:-}" ]; then
+    __TARGET_VERSION_CUTOFF="$(resolve_target_version_cutoff "${TARGET_VERSION:-latest}")"
+  fi
+  printf '%s' "${__TARGET_VERSION_CUTOFF}"
+}
+
 # Убирает суффиксы вроде «-ce.0» и переводит версию в компактный вид.
 normalize_version_string() {
   local version="$1"
@@ -277,14 +362,12 @@ describe_upgrade_stop() {
 
 should_include_stop() {
   local series="$1" requirement="$2"
-  local include_optional major list
+  local include_optional list series_semver cutoff
 
-  major="${series%%.*}"
-  if [[ "$series" == "$major" ]]; then
-    major="$series"
-  fi
+  cutoff="$(target_version_cutoff)"
+  series_semver="$(series_to_semver "$series")"
 
-  if [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 17 ] && [ "${DO_TARGET_17:-no}" != "yes" ]; then
+  if ! version_ge "$cutoff" "$series_semver"; then
     return 1
   fi
 

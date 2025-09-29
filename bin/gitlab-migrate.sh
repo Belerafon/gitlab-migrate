@@ -126,6 +126,7 @@ main() {
   fi
 
   log "[>] Формирую «лестницу» апгрейдов…"
+  log "  Целевая версия (максимум): $(target_version_cutoff)"
   mapfile -t stops < <(compute_stops)
   log "  Запланированные остановки (серия → патч):"
   local stop_metadata

@@ -961,6 +961,17 @@ background_migrations_status_report() {
   return $status_rc
 }
 
+background_log_pending_summary() {
+  local indent="${1:-}"
+
+  if [ -n "${BACKGROUND_STATUS_TASK_DETAILS:-}" ]; then
+    log "${indent}${BACKGROUND_STATUS_TASK_DETAILS}"
+    return
+  fi
+
+  log "${indent}gitlab:background_migrations:status (миграции): ${BACKGROUND_PENDING_TOTAL:-0}"
+}
+
 background_collect_pending() {
   BACKGROUND_PENDING_TOTAL=0
   BACKGROUND_PENDING_DETAILS=""
@@ -1190,16 +1201,12 @@ background_collect_pending() {
 background_wait_for_completion() {
   local context="$1"
   local interval="${BACKGROUND_WAIT_INTERVAL:-60}"
-  local report_every="${BACKGROUND_WAIT_REPORT_EVERY:-5}"
-  local progress_interval="${BACKGROUND_WAIT_PROGRESS_INTERVAL:-300}"
-  local start_ts now waited attempt=0 report_counter=0 last_signature="" last_log_ts=0 signature="" should_log=0 last_total=-1
+  local progress_interval="${BACKGROUND_WAIT_PROGRESS_INTERVAL:-600}"
+  local start_ts now waited attempt=0 last_signature="" last_log_ts=0 signature="" should_log=0 last_total=-1
   local message="" total="0" context_note=""
 
   if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -le 0 ]; then
     interval=60
-  fi
-  if ! [[ "$report_every" =~ ^[0-9]+$ ]]; then
-    report_every=5
   fi
   if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || [ "$progress_interval" -le 0 ]; then
     progress_interval=$((interval * 5))
@@ -1257,13 +1264,7 @@ background_wait_for_completion() {
             message+=" (без изменений)"
           fi
           log "$message"
-          if [ -n "$BACKGROUND_PENDING_DETAILS" ]; then
-            printf '%s\n' "$BACKGROUND_PENDING_DETAILS" | indent_with_prefix "        "
-          fi
-          report_counter=$((report_counter + 1))
-          if [ "$report_counter" -eq 1 ] || { [ "$report_every" -gt 0 ] && [ $((report_counter % report_every)) -eq 0 ]; }; then
-            background_migrations_status_report "    " || true
-          fi
+          background_log_pending_summary "    "
           last_signature="$signature"
           last_log_ts=$now
           last_total=$total

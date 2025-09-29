@@ -454,6 +454,61 @@ show_versions() {
   dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo "unknown"' >&2 || true
 }
 
+shorten_http_probe_label() {
+  local label="$1"
+  label="${label//, self-signed/}"
+  printf '%s' "$label"
+}
+
+shorten_http_probe_detail() {
+  local detail="$1" code="$2" normalized=""
+
+  normalized="$(printf '%s' "${detail}" | tr '\r' ' ' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //; s/ $//')"
+
+  if [ -z "$normalized" ]; then
+    printf '%s' "${code:-000}"
+    return 0
+  fi
+
+  if [ "$code" = "000" ] && [[ "$normalized" == *" 000" ]]; then
+    normalized="${normalized% 000}"
+  fi
+
+  if [ "$code" = "000" ] && [[ "$normalized" =~ curl:\ \(([0-9]+)\) ]]; then
+    printf 'curl#%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  if [[ "$normalized" =~ ^[0-9]{3}$ ]]; then
+    printf '%s' "$normalized"
+    return 0
+  fi
+
+  if [ "$normalized" = "NO_CURL" ]; then
+    printf '%s' "curl-missing"
+    return 0
+  fi
+
+  if [ "$code" = "000" ]; then
+    printf '%s' "$(printf '%s' "$normalized" | cut -c1-40)"
+    return 0
+  fi
+
+  printf '%s' "$(printf '%s' "$normalized" | cut -c1-60)"
+}
+
+format_http_probe_attempt() {
+  local label detail code="$3" short_label short_detail
+  short_label="$(shorten_http_probe_label "$1")"
+  detail="$2"
+  short_detail="$(shorten_http_probe_detail "$detail" "$code")"
+  if [ -n "$short_detail" ]; then
+    printf '%s=%s' "$short_label" "$short_detail"
+  else
+    printf '%s=%s' "$short_label" "${code:-000}"
+  fi
+}
+
 probe_gitlab_http() {
   local endpoints=(
     "http://127.0.0.1:8080/-/readiness|readiness (workhorse:8080)"
@@ -475,7 +530,7 @@ probe_gitlab_http() {
     output="${output//$'\r'/}"
     code="${output##*$'\n'}"
     clean_output="${output//$'\n'/ }"
-    attempts+=("${desc}: ${clean_output:-n/a}")
+    attempts+=("$(format_http_probe_attempt "$desc" "${clean_output:-n/a}" "$code")")
     if [ "$clean_output" = "NO_CURL" ]; then
       printf '%s' "curl недоступен в контейнере"
       return 1
@@ -525,7 +580,7 @@ probe_gitlab_http_host() {
   output="${output//$'\r'/}"
   code="${output##*$'\n'}"
   clean_output="${output//$'\n'/ }"
-  attempts+=("${desc}: ${clean_output:-n/a}")
+  attempts+=("$(format_http_probe_attempt "$desc" "${clean_output:-n/a}" "$code")")
 
   if [[ "$code" =~ ^[0-9]{3}$ ]]; then
     case "$code" in

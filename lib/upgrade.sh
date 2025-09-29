@@ -401,6 +401,11 @@ prompt_snapshot_after_upgrade() {
   snapshot_ts="$(get_state SNAPSHOT_TS || true)"
   snapshot_image="$(get_state SNAPSHOT_IMAGE || true)"
 
+  if ! background_wait_for_completion "перед созданием снапшота"; then
+    err "Создание снапшота недоступно: фоновые миграции не завершены"
+    return 1
+  fi
+
   if [ -z "$snapshot_version" ]; then
     snapshot_display="нет"
   else
@@ -616,7 +621,9 @@ upgrade_to_series() {
       fi
     fi
 
-    prompt_snapshot_after_upgrade "$current_version" "$target"
+    if ! prompt_snapshot_after_upgrade "$current_version" "$target"; then
+      exit 1
+    fi
 
     log "[>] Пауза ${WAIT_BETWEEN_STEPS}s"; sleep "$WAIT_BETWEEN_STEPS"
     set_state LAST_UPGRADED_TO "$target"

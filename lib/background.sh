@@ -118,6 +118,67 @@ background_append_psql_error() {
   background_append_error_msg "$message"
 }
 
+background_try_finalize_fix_non_existing_timelog_users() {
+  local status_expr status_condition query migration_id_raw migration_id
+  local orphan_sql orphan_raw orphan_count update_sql update_raw
+  local update_trimmed updated_count
+
+  if ! background_psql_table_exists 'public.batched_background_migrations'; then
+    return 0
+  fi
+
+  status_expr="$(background_status_case_expression 'public.batched_background_migrations' 'status')"
+  [ -z "$status_expr" ] && status_expr='status'
+  status_condition="${status_expr} = 'failed'"
+
+  query="SELECT id FROM batched_background_migrations WHERE job_class_name = 'FixNonExistingTimelogUsers' AND ${status_condition} ORDER BY id LIMIT 1"
+  if ! background_psql "$query"; then
+    background_append_psql_error 'FixNonExistingTimelogUsers (поиск записи)' "$query"
+    return 1
+  fi
+
+  migration_id_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+  migration_id="$(printf '%s' "$migration_id_raw" | tr -d '\r' | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0); print}')"
+  if [ -z "$migration_id" ]; then
+    return 0
+  fi
+
+  orphan_sql="SELECT COUNT(*) FROM timelogs t LEFT JOIN users u ON u.id = t.user_id WHERE u.id IS NULL"
+  if ! background_psql "$orphan_sql"; then
+    background_append_psql_error 'FixNonExistingTimelogUsers (проверка timelogs)' "$orphan_sql"
+    return 1
+  fi
+
+  orphan_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+  orphan_count="$(printf '%s' "$orphan_raw" | tr -d '\r' | awk 'NR==1 {gsub(/[[:space:]]/,"",$0); print}')"
+  if ! [[ "$orphan_count" =~ ^[0-9]+$ ]]; then
+    background_append_error_msg "FixNonExistingTimelogUsers: неожиданный результат COUNT(*) timelogs — ${orphan_raw}"
+    return 1
+  fi
+
+  if [ "$orphan_count" -gt 0 ]; then
+    background_append_blocker "FixNonExistingTimelogUsers: обнаружено ${orphan_count} timelog(s) без пользователя — автоматическое завершение невозможно"
+    return 0
+  fi
+
+  update_sql="UPDATE batched_background_migrations SET status = 6, updated_at = NOW() WHERE job_class_name = 'FixNonExistingTimelogUsers' AND ${status_condition} AND NOT EXISTS (SELECT 1 FROM timelogs t LEFT JOIN users u ON u.id = t.user_id WHERE u.id IS NULL)"
+  if ! background_psql "$update_sql"; then
+    background_append_psql_error 'FixNonExistingTimelogUsers (обновление статуса)' "$update_sql"
+    return 1
+  fi
+
+  update_raw="${BACKGROUND_LAST_PSQL_OUTPUT:-}"
+  update_trimmed="$(printf '%s' "$update_raw" | tr -d '\r' | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0); print}')"
+  if [[ "$update_trimmed" =~ ^UPDATE[[:space:]][0-9]+$ ]]; then
+    updated_count="$(printf '%s' "$update_trimmed" | awk '{print $2}')"
+    if [[ "$updated_count" =~ ^[0-9]+$ ]] && [ "$updated_count" -gt 0 ]; then
+      ok "FixNonExistingTimelogUsers: автоматически помечена как finalized (id=${migration_id}) — осиротевших timelogs не найдено"
+    fi
+  fi
+
+  return 0
+}
+
 background_load_legacy_queue_stats() {
   if [ "${BACKGROUND_LEGACY_QUEUE_LOADED:-0}" -eq 1 ]; then
     return ${BACKGROUND_LEGACY_QUEUE_RC:-0}
@@ -987,6 +1048,8 @@ background_collect_pending() {
   BACKGROUND_LEGACY_QUEUE_ERROR=""
   BACKGROUND_LEGACY_QUEUE_COUNT=""
   BACKGROUND_LEGACY_QUEUE_TRACKED=""
+
+  background_try_finalize_fix_non_existing_timelog_users || true
 
   local total=0 table_rc=0 query="" count_raw="" trimmed="" status_raw="" job_raw="" job_total="" detail_line=""
   local batched_status_expr="" batched_condition="" batched_job_status_expr="" batched_job_condition=""

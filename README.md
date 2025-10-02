@@ -1,53 +1,90 @@
 # GitLab CE Migration Toolkit (modular)
-    
-Модульный набор скриптов для восстановления GitLab CE 13.1.4 из бэкапа и пошагового апгрейда до GitLab 18.x (или выбранной целевой версии) в Docker.
 
-## Структура
+A modular collection of Bash helpers for restoring a GitLab CE 13.1.4 backup and walking it through the officially supported upgrade ladder until GitLab 18.x (or any target version that you configure) inside Docker.
+
+## Highlights
+- **Deterministic upgrade ladder** – automatically walks the mandatory GitLab upgrade path (13.0.x → … → 18.4.x) and respects optional "stop" releases required by upstream documentation.
+- **PostgreSQL guard rails** – inspects running binaries and data directories before each major PostgreSQL jump, selects the proper `--old-bindir` / `--new-bindir` combination for `pg-upgrade`, and prints the full reasoning to the terminal.
+- **Stateful reruns** – stores progress in `STATE_FILE`, allowing you to resume after interruptions and to reuse locally cached Docker images.
+- **Snapshot-aware** – captures a `gitlab-snapshot` copy of `/srv/gitlab` after the initial restore and can restart from it without unpacking the original backup again.
+- **Verbose logging** – mirrors all stdout/stderr into timestamped files under `logs/` for post-mortem debugging.
+
+## Repository layout
 ```
 gitlab-migrate/
-  bin/gitlab-migrate.sh          # Точка входа
-  conf/settings.env              # Конфигурация
-  lib/log.sh                     # Логирование
-  lib/state.sh                   # Состояние/диалог
-  lib/docker.sh                  # Docker-помощники и ожидания
-  lib/dirs.sh                    # Работа с каталогами /srv/gitlab
-  lib/backup.sh                  # Импорт, проверка и восстановление бэкапа
-  lib/upgrade.sh                 # «Лестница» версий
+  bin/gitlab-migrate.sh          # entry point
+  conf/settings.env              # migration configuration
+  lib/                           # modular helpers (logging, docker, backup, upgrades, ...)
+  logs/                          # created on demand, stores run logs
 ```
 
-Скрипт поднимает GitLab через обязательные промежуточные релизы: 13.0.x → 13.1.x → 13.8.x → 13.12.x → 14.0.x → 14.3.x → 14.9.x → 14.10.x → 15.0.x → 15.4.x → 15.11.x → 16.3.x → 16.7.x → 16.11.x → 17.0.x → 17.3.x → 17.5.x → 17.8.x → 17.11.x → 18.0.x → 18.2.x → 18.4.x. Условные остановки (15.1.x, 16.0.x, 16.1.x, 16.2.x, 17.1.x) включены по умолчанию и управляются параметром `INCLUDE_OPTIONAL_STOPS` в `conf/settings.env`.
+## Prerequisites
+- A host capable of running Docker Engine (root access is required by the scripts).
+- Extracted GitLab backup artifacts that match the expected naming convention (see [Backup requirements](#backup-requirements)).
+- Enough free disk space for multiple `/srv/gitlab` copies (restore, snapshot, intermediate upgrades).
 
-## Особенности
+## Configuration
+All runtime configuration lives in [`conf/settings.env`](conf/settings.env):
+- **Container & networking:** `CONTAINER_NAME`, `HOST_IP`, and port mappings (`PORT_HTTP`, `PORT_HTTPS`, `PORT_SSH`).
+- **Data directories:** `DATA_ROOT` for `/srv/gitlab` on the host and `BACKUPS_SRC` pointing to the extracted backup files.
+- **Target version:** `TARGET_VERSION` controls how far the ladder proceeds (see [Target version control](#target-version-control)).
+- **Optional stops:** `INCLUDE_OPTIONAL_STOPS` (`yes` / `no` / `list`) and `OPTIONAL_STOP_LIST` fine-tune intermediate releases.
+- **State & timing:** `STATE_FILE`, readiness timeouts, and wait intervals for GitLab, PostgreSQL, and background migrations.
 
-- Перед каждым переходом на новую ветку PostgreSQL скрипт автоматически сверяет версии данных и бинарников, подбирает корректные каталоги `--old-bindir`/`--new-bindir` для `pg-upgrade` и выводит подробный лог проверок прямо в терминал.
-    
-## Быстрый старт
+Edit the file before the first run and adjust paths and ports to match your environment.
+
+## Migration flow
+1. Validate prerequisites (`docker`, root privileges) and load persisted state.
+2. Ensure working directories exist, restore from a local snapshot if present, otherwise import the backup and GitLab configuration.
+3. Pull or reuse the base Docker image for the source GitLab version and start the container.
+4. Wait for GitLab and PostgreSQL readiness, then restore the backup into the container.
+5. Create an on-host snapshot of `/srv/gitlab` for future reruns.
+6. Build the upgrade ladder, honouring optional stops, and upgrade sequentially, pausing when required to let background migrations finish.
+
+The script is safe to re-run: it will resume from the last confirmed checkpoint and skip already completed steps.
+
+## Quick start
 ```bash
-# 1) Распаковать архив в /root (или любую директорию)
+# 1) Extract the toolkit archive (example path)
 tar -xzf gitlab-migrate-modular.tar.gz -C /root
 
-# 2) Проверить/поправить конфиг (путь BACKUPS_SRC и порты)
+# 2) Review configuration before the first launch
 nano /root/gitlab-migrate/conf/settings.env
 
-# 3) Запуск
+# 3) Start the migration interactively
 bash /root/gitlab-migrate/bin/gitlab-migrate.sh
 
-# 4) При наличии старых данных ответьте `y` на вопрос очистки — это эквивалент `--clean`
-#    или запустите сразу в неинтерактивном режиме:
+# 4) To wipe existing /srv/gitlab data without confirmation, add --clean
 bash /root/gitlab-migrate/bin/gitlab-migrate.sh --clean
 
-# 5) После первого восстановления скрипт сохранит локальный снимок `/srv/gitlab-snapshot`.
-#    Повторный запуск предложит восстановить данные из этого снимка и продолжит миграцию
-#    со следующего шага без повторного распаковки исходного бэкапа.
+# 5) After the first restore the script creates /srv/gitlab-snapshot.
+#    Subsequent runs can reuse it instead of re-extracting the original backup.
 ```
 
-В каталоге, указанном в `BACKUPS_SRC`, должны находиться архив бэкапа `*_gitlab_backup.tar*` и файл `gitlab_config.tar` с `gitlab.rb` и `gitlab-secrets.json`.
+## Backup requirements
+`BACKUPS_SRC` must contain:
+- The GitLab configuration archive `gitlab_config.tar` with `gitlab.rb` and `gitlab-secrets.json`.
+- The GitLab backup archive named `*_gitlab_backup.tar*` (optionally compressed with `.gz`).
 
-## Настройка целевой версии
-В конфиге `conf/settings.env` задайте `TARGET_VERSION`. Допустимы варианты:
+## Target version control
+`TARGET_VERSION` accepts three forms:
+- `latest` (default) — run through the entire ladder to the newest release registered in `lib/upgrade.sh`.
+- A major/minor series (e.g., `17.11` or `18.2`) — stop at the latest patch within that series.
+- A full semantic version (e.g., `18.4.1` or `16.11.10`).
 
-- `latest` (по умолчанию) — пройти всю лестницу до актуального финального релиза, зарегистрированного в `lib/upgrade.sh`.
-- Версия без суффикса (например, `17.11` или `18.2`) — дойти до последнего патча указанной серии.
-- Полная версия с патчем (например, `18.4.1` или `16.11.10`).
+After adjusting `TARGET_VERSION`, rerun `bin/gitlab-migrate.sh`. The ladder is automatically trimmed to the specified ceiling.
 
-После изменения переменной перезапустите `bin/gitlab-migrate.sh`. Скрипт автоматически подрежет лестницу апгрейдов до указанного предела.
+## Logs and state artifacts
+- Run logs: `logs/gitlab-migrate-<timestamp>.log`.
+- Snapshot: `/srv/gitlab-snapshot` on the host.
+- Persistent state: `STATE_FILE` (defaults to `/root/gitlab_upgrade_state.env`).
+
+These artifacts are safe to remove if you need to force a clean restart.
+
+## Troubleshooting tips
+- Use `--reset` to discard the stored state and rebuild the ladder from scratch.
+- Check Docker logs with `docker logs <container>` if GitLab fails to start.
+- Inspect `logs/gitlab-migrate-*.log` for detailed PostgreSQL upgrade checks.
+
+## License
+This repository currently does not ship with an explicit license. Provide one before distributing the toolkit further.

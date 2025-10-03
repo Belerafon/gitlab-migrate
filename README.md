@@ -1,5 +1,7 @@
 # GitLab CE Migration Toolkit (modular)
 
+(totally wibecoded)
+
 A modular collection of Bash helpers for restoring a GitLab CE 13.1.4 backup and walking it through the officially supported upgrade ladder until GitLab 18.x (or any target version that you configure) inside Docker.
 
 ## Highlights

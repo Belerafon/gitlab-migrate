@@ -189,9 +189,14 @@ should_ignore_reconfigure_failure() {
   fi
 
   set +e
+  # В логе Chef остаётся финальная строка "There was an error running gitlab-ctl reconfigure",
+  # которая дублирует информацию о падении Grafana. После проверки, что кроме Grafana
+  # других runit-сервисов в ошибке нет, фильтруем её отдельно, чтобы не считать это
+  # «неизвестной» ошибкой.
   chef_filter_log_file "$log_file" 2>/dev/null \
     | grep -F '[chef][ERR]' \
     | grep -Fv 'runit_service[grafana]' \
+    | grep -Fv 'There was an error running gitlab-ctl reconfigure' \
     >/dev/null
   rc=$?
   set -e
@@ -348,7 +353,7 @@ normalize_backup_name() {
 }
 
 fix_owners() {
-  local UIDG_GIT U_GIT G_GIT UIDG_PSQL U_PSQL G_PSQL
+  local UIDG_GIT U_GIT G_GIT UIDG_PSQL U_PSQL G_PSQL UIDG_PROM U_PROM G_PROM
 
   UIDG_GIT=$(dexec 'printf "%s:%s" "$(id -u git)" "$(id -g git)"' 2>/dev/null || echo "998:998")
   UIDG_GIT=$(printf "%s" "$UIDG_GIT" | tr -d '\n')
@@ -360,12 +365,22 @@ fix_owners() {
   U_PSQL=${UIDG_PSQL%%:*}
   G_PSQL=${UIDG_PSQL##*:}
 
+  UIDG_PROM=$(dexec 'if id -u gitlab-prometheus >/dev/null 2>&1; then printf "%s:%s" "$(id -u gitlab-prometheus)" "$(id -g gitlab-prometheus)"; fi' 2>/dev/null || true)
+  UIDG_PROM=$(printf "%s" "$UIDG_PROM" | tr -d '\n')
+  U_PROM=${UIDG_PROM%%:*}
+  G_PROM=${UIDG_PROM##*:}
+
   chown -R root:root "$DATA_ROOT/config"
   chown -R "$U_GIT:$G_GIT" "$DATA_ROOT/data" "$DATA_ROOT/logs"
   chown -R "$U_PSQL:$G_PSQL" "$DATA_ROOT/data/postgresql" 2>/dev/null || true
+  local prom_summary=""
+  if [ -n "$UIDG_PROM" ] && [ -d "$DATA_ROOT/data/grafana" ]; then
+    chown -R "$U_PROM:$G_PROM" "$DATA_ROOT/data/grafana"
+    prom_summary=", gitlab-prometheus uid:gid = $U_PROM:$G_PROM (grafana)"
+  fi
   chmod 700 "$DATA_ROOT/data/backups" 2>/dev/null || true
   chmod 600 "$DATA_ROOT/data/backups"/*gitlab_backup.tar* 2>/dev/null || true
-  ok "Права на каталоги выровнены (git uid:gid = $U_GIT:$G_GIT, gitlab-psql uid:gid = $U_PSQL:$G_PSQL)"
+  ok "Права на каталоги выровнены (git uid:gid = $U_GIT:$G_GIT, gitlab-psql uid:gid = $U_PSQL:$G_PSQL${prom_summary})"
 }
 
 check_backup_versions() {

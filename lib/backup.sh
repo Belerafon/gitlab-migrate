@@ -188,16 +188,27 @@ should_ignore_reconfigure_failure() {
     return 1
   fi
 
-  set +e
-  chef_filter_log_file "$log_file" 2>/dev/null \
-    | grep -F '[chef][ERR]' \
-    | grep -Fv 'runit_service[grafana]' \
-    >/dev/null
-  rc=$?
-  set -e
-  if [ "$rc" -eq 0 ]; then
-    return 1
-  fi
+  local -a ignore_err_patterns=(
+    'runit_service[grafana]'
+    'There was an error running gitlab-ctl reconfigure'
+    'There was an error running chef-client'
+    'Chef Infra Client failed'
+  )
+
+  local err_line skip pattern
+  while IFS= read -r err_line; do
+    skip=0
+    for pattern in "${ignore_err_patterns[@]}"; do
+      if [[ "$err_line" == *"$pattern"* ]]; then
+        skip=1
+        break
+      fi
+    done
+
+    if [ "$skip" -eq 0 ]; then
+      return 1
+    fi
+  done < <(chef_filter_log_file "$log_file" 2>/dev/null | grep -F '[chef][ERR]' || true)
 
   if [ -n "$reason_var" ]; then
     printf -v "$reason_var" '%s' "$optional_reason"

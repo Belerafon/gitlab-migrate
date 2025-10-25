@@ -152,6 +152,60 @@ print_reconfigure_failure_excerpt() {
   fi
 }
 
+should_ignore_reconfigure_failure() {
+  local log_file="$1" reason_var="$2"
+
+  [ -f "$log_file" ] || return 1
+
+  local version="" optional_reason="" other_service="" rc=0
+
+  version="$(gitlab_detect_version_for_health_checks)"
+  if ! gitlab_service_optional "grafana" "$version" optional_reason; then
+    return 1
+  fi
+
+  if [ -z "$optional_reason" ]; then
+    return 1
+  fi
+
+  if ! grep -q "runit_service\\[grafana\\]" "$log_file" 2>/dev/null; then
+    return 1
+  fi
+
+  if ! grep -q "Error executing action \`restart\` on resource 'runit_service\\[grafana\\]'" "$log_file" 2>/dev/null; then
+    return 1
+  fi
+
+  other_service=$(awk '
+    match($0, /runit_service\[([A-Za-z0-9_-]+)\]/, m) {
+      if (m[1] != "grafana") {
+        print m[1]
+        exit
+      }
+    }
+  ' "$log_file" 2>/dev/null || true)
+  if [ -n "$other_service" ]; then
+    return 1
+  fi
+
+  set +e
+  chef_filter_log_file "$log_file" 2>/dev/null \
+    | grep -F '[chef][ERR]' \
+    | grep -Fv 'runit_service[grafana]' \
+    >/dev/null
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    return 1
+  fi
+
+  if [ -n "$reason_var" ]; then
+    printf -v "$reason_var" '%s' "$optional_reason"
+  fi
+
+  return 0
+}
+
 run_reconfigure() {
   local cmd="${1:-gitlab-ctl reconfigure}"
   local rlog_container="/var/log/gitlab/reconfigure.log"
@@ -193,6 +247,13 @@ run_reconfigure() {
   summarize_reconfigure_log "$rlog_host" "ошибка"
   print_reconfigure_failure_excerpt "$rlog_host"
   report_basic_health "после ошибки gitlab-ctl reconfigure" "skip-db"
+
+  local ignore_reason=""
+  if should_ignore_reconfigure_failure "$rlog_host" ignore_reason; then
+    warn "[chef] Обнаружена сбойная перезагрузка опционального сервиса: ${ignore_reason}. Продолжаю несмотря на код возврата"
+    return 0
+  fi
+
   err "gitlab-ctl reconfigure завершился с ошибкой. Лог: $rlog_host"
   return 1
 }

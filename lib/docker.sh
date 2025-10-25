@@ -454,6 +454,64 @@ show_versions() {
   dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null || echo "unknown"' >&2 || true
 }
 
+gitlab_detect_version_for_health_checks() {
+  local version=""
+
+  if declare -F current_gitlab_version >/dev/null 2>&1; then
+    version="$(current_gitlab_version 2>/dev/null || true)"
+  else
+    version="$(dexec 'cat /opt/gitlab/embedded/service/gitlab-rails/VERSION 2>/dev/null' 2>/dev/null || true)"
+  fi
+
+  version="${version//$'\r'/}"
+  version="${version//$'\n'/}"
+
+  printf '%s' "$version"
+}
+
+gitlab_service_optional() {
+  local service="$1" version="${2-}" reason_var="${3-}" reason=""
+
+  if [ -z "$service" ]; then
+    if [ -n "$reason_var" ]; then
+      printf -v "$reason_var" '%s' ""
+    fi
+    return 1
+  fi
+
+  if [ -z "$version" ]; then
+    version="$(gitlab_detect_version_for_health_checks)"
+  fi
+
+  version="${version%%-*}"
+  version="${version%%+*}"
+  version="$(printf '%s' "$version" | tr -d '[:space:]')"
+
+  local major="" minor=""
+  IFS=. read -r major minor _ <<< "$version"
+
+  if ! [[ "$major" =~ ^[0-9]+$ ]] || ! [[ "$minor" =~ ^[0-9]+$ ]]; then
+    if [ -n "$reason_var" ]; then
+      printf -v "$reason_var" '%s' ""
+    fi
+    return 1
+  fi
+
+  case "$service" in
+    grafana)
+      if [ "$major" -eq 13 ] && [ "$minor" -eq 1 ]; then
+        reason="Grafana не входит в образ GitLab ${version}, сервис считается необязательным"
+      fi
+      ;;
+  esac
+
+  if [ -n "$reason_var" ]; then
+    printf -v "$reason_var" '%s' "$reason"
+  fi
+
+  [ -n "$reason" ]
+}
+
 shorten_http_probe_label() {
   local label="$1"
   label="${label//, self-signed/}"
@@ -653,11 +711,37 @@ report_basic_health() {
   # shellcheck disable=SC2034 # значение читается из runtime.sh
   LAST_HEALTH_HOST_HTTP_INFO="${host_http_info:-проверка не выполнена}"
 
-  local ctl_output ctl_rc=0
+  local ctl_output ctl_rc=0 suppressed_optional_message=""
   if ctl_output=$(dexec 'gitlab-ctl status' 2>&1); then
     ctl_rc=0
   else
     ctl_rc=$?
+  fi
+  if [ -n "$ctl_output" ] && [ "$ctl_rc" -ne 0 ]; then
+    local gitlab_version_for_checks="" non_optional_found=0
+    local -a optional_services=() optional_details=()
+    gitlab_version_for_checks="$(gitlab_detect_version_for_health_checks)"
+
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]*(down|fail|warning):[[:space:]]*([a-zA-Z0-9_-]+) ]]; then
+        local svc="${BASH_REMATCH[2]}" reason=""
+
+        if gitlab_service_optional "$svc" "$gitlab_version_for_checks" reason; then
+          if [[ " ${optional_services[*]} " != *" $svc "* ]]; then
+            [ -n "$reason" ] || reason="необязательный сервис для GitLab ${gitlab_version_for_checks:-unknown}"
+            optional_services+=("$svc")
+            optional_details+=("$svc: $reason")
+          fi
+        else
+          non_optional_found=1
+        fi
+      fi
+    done <<< "$ctl_output"
+
+    if [ "$non_optional_found" -eq 0 ] && [ ${#optional_services[@]} -gt 0 ]; then
+      ctl_rc=0
+      suppressed_optional_message="Игнорирую статус служб: $(IFS='; '; echo "${optional_details[*]}")"
+    fi
   fi
   if [ -n "$ctl_output" ]; then
     if [ "$ctl_rc" -eq 0 ]; then
@@ -668,6 +752,9 @@ report_basic_health() {
       log "      вывод команды:"
     fi
     printf '%s\n' "$ctl_output" | sed 's/^/      /'
+    if [ -n "$suppressed_optional_message" ]; then
+      log "      ${suppressed_optional_message}"
+    fi
   else
     warn "    - gitlab-ctl status не вернул данных"
     issues+=("gitlab-ctl status не вернул данных")

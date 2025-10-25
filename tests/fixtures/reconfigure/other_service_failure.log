@@ -1,3 +1,0 @@
-[chef][INFO] Starting Chef Infra Client, version 15.17.4
-[chef][ERR] Error executing action `restart` on resource 'runit_service[puma]'
-[chef][ERR] There was an error running gitlab-ctl reconfigure

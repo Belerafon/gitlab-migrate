@@ -1,5 +1,0 @@
-[chef][INFO] Starting Chef Infra Client, version 15.17.4
-[chef][INFO] Running handlers:
-[chef][ERR] Error executing action `restart` on resource 'runit_service[grafana]'
-[chef][ERR] Chef Infra Client failed. 1 resources updated in 04 seconds
-[chef][ERR] There was an error running gitlab-ctl reconfigure

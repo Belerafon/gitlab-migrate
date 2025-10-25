@@ -512,6 +512,61 @@ gitlab_service_optional() {
   [ -n "$reason" ]
 }
 
+gitlab_ctl_status_collect() {
+  local output_var="${1-}" suppressed_var="${2-}" raw_rc_var="${3-}" effective_rc_var="${4-}"
+  local output="" raw_rc=0 effective_rc=0 suppressed="" version="" non_optional_found=0
+  local -a optional_services=() optional_details=()
+
+  if output=$(dexec 'gitlab-ctl status' 2>&1); then
+    raw_rc=0
+  else
+    raw_rc=$?
+  fi
+
+  effective_rc=$raw_rc
+
+  if [ -n "$output" ] && [ "$raw_rc" -ne 0 ]; then
+    version="$(gitlab_detect_version_for_health_checks)"
+    version="${version:-unknown}"
+
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]*(down|fail|warning):[[:space:]]*([a-zA-Z0-9_-]+) ]]; then
+        local svc="${BASH_REMATCH[2]}" reason=""
+
+        if gitlab_service_optional "$svc" "$version" reason; then
+          if [[ " ${optional_services[*]} " != *" $svc "* ]]; then
+            [ -n "$reason" ] || reason="необязательный сервис для GitLab ${version}";
+            optional_services+=("$svc")
+            optional_details+=("$svc: $reason")
+          fi
+        else
+          non_optional_found=1
+        fi
+      fi
+    done <<< "$output"
+
+    if [ "$non_optional_found" -eq 0 ] && [ ${#optional_services[@]} -gt 0 ]; then
+      effective_rc=0
+      suppressed="Игнорирую статус служб: $(IFS='; '; echo "${optional_details[*]}")"
+    fi
+  fi
+
+  if [ -n "$output_var" ]; then
+    printf -v "$output_var" '%s' "$output"
+  fi
+  if [ -n "$suppressed_var" ]; then
+    printf -v "$suppressed_var" '%s' "$suppressed"
+  fi
+  if [ -n "$raw_rc_var" ]; then
+    printf -v "$raw_rc_var" '%s' "$raw_rc"
+  fi
+  if [ -n "$effective_rc_var" ]; then
+    printf -v "$effective_rc_var" '%s' "$effective_rc"
+  fi
+
+  return "$effective_rc"
+}
+
 shorten_http_probe_label() {
   local label="$1"
   label="${label//, self-signed/}"
@@ -711,53 +766,26 @@ report_basic_health() {
   # shellcheck disable=SC2034 # значение читается из runtime.sh
   LAST_HEALTH_HOST_HTTP_INFO="${host_http_info:-проверка не выполнена}"
 
-  local ctl_output ctl_rc=0 suppressed_optional_message=""
-  if ctl_output=$(dexec 'gitlab-ctl status' 2>&1); then
-    ctl_rc=0
-  else
-    ctl_rc=$?
-  fi
-  if [ -n "$ctl_output" ] && [ "$ctl_rc" -ne 0 ]; then
-    local gitlab_version_for_checks="" non_optional_found=0
-    local -a optional_services=() optional_details=()
-    gitlab_version_for_checks="$(gitlab_detect_version_for_health_checks)"
-
-    while IFS= read -r line; do
-      if [[ "$line" =~ ^[[:space:]]*(down|fail|warning):[[:space:]]*([a-zA-Z0-9_-]+) ]]; then
-        local svc="${BASH_REMATCH[2]}" reason=""
-
-        if gitlab_service_optional "$svc" "$gitlab_version_for_checks" reason; then
-          if [[ " ${optional_services[*]} " != *" $svc "* ]]; then
-            [ -n "$reason" ] || reason="необязательный сервис для GitLab ${gitlab_version_for_checks:-unknown}"
-            optional_services+=("$svc")
-            optional_details+=("$svc: $reason")
-          fi
-        else
-          non_optional_found=1
-        fi
-      fi
-    done <<< "$ctl_output"
-
-    if [ "$non_optional_found" -eq 0 ] && [ ${#optional_services[@]} -gt 0 ]; then
-      ctl_rc=0
-      suppressed_optional_message="Игнорирую статус служб: $(IFS='; '; echo "${optional_details[*]}")"
-    fi
-  fi
-  if [ -n "$ctl_output" ]; then
-    if [ "$ctl_rc" -eq 0 ]; then
-      log "    - Службы (gitlab-ctl status):"
-    else
-      warn "    - gitlab-ctl status завершился с кодом ${ctl_rc}"
-      issues+=("gitlab-ctl status rc=${ctl_rc}")
-      log "      вывод команды:"
-    fi
+  local ctl_output="" ctl_raw_rc=0 suppressed_optional_message=""
+  if gitlab_ctl_status_collect ctl_output suppressed_optional_message ctl_raw_rc; then
+    log "    - Службы (gitlab-ctl status):"
     printf '%s\n' "$ctl_output" | sed 's/^/      /'
     if [ -n "$suppressed_optional_message" ]; then
       log "      ${suppressed_optional_message}"
     fi
   else
-    warn "    - gitlab-ctl status не вернул данных"
-    issues+=("gitlab-ctl status не вернул данных")
+    if [ -n "$ctl_output" ]; then
+      warn "    - gitlab-ctl status завершился с кодом ${ctl_raw_rc}"
+      issues+=("gitlab-ctl status rc=${ctl_raw_rc}")
+      log "      вывод команды:"
+      printf '%s\n' "$ctl_output" | sed 's/^/      /'
+      if [ -n "$suppressed_optional_message" ]; then
+        log "      ${suppressed_optional_message}"
+      fi
+    else
+      warn "    - gitlab-ctl status не вернул данных"
+      issues+=("gitlab-ctl status не вернул данных")
+    fi
   fi
 
   if [ "$check_db" -eq 1 ]; then
@@ -970,6 +998,8 @@ wait_gitlab_ready() {
   local ctl_last_report=0
   local ctl_fmt_total="∞"
   local ctl_success=0
+  local ctl_last_suppressed=""
+  local ctl_last_raw_rc=0
   local start_ts now
 
   log "[>] Ожидаю готовность gitlab-ctl status (таймаут ${ctl_timeout}s)…"
@@ -981,8 +1011,11 @@ wait_gitlab_ready() {
   start_ts=$(date +%s)
 
   while true; do
-    if dexec 'gitlab-ctl status >/dev/null 2>&1'; then
+    local ctl_suppressed="" ctl_raw_rc=0
+    if gitlab_ctl_status_collect "" ctl_suppressed ctl_raw_rc; then
       ctl_success=1
+      ctl_last_suppressed="$ctl_suppressed"
+      ctl_last_raw_rc="$ctl_raw_rc"
       break
     fi
 
@@ -1017,6 +1050,9 @@ wait_gitlab_ready() {
   fi
 
   ok "gitlab-ctl status OK"
+  if [ -n "$ctl_last_suppressed" ] && [ "$ctl_last_raw_rc" -ne 0 ]; then
+    log "    ${ctl_last_suppressed}"
+  fi
 
   log "[>] Ожидаю доступность HTTP GitLab (стабильность ${http_stable_window}s; таймаут ${http_timeout}s)…"
 
@@ -1267,7 +1303,7 @@ wait_upgrade_completion() {
     fi
 
     local ctl_ok=0
-    if dexec 'gitlab-ctl status >/dev/null 2>&1'; then
+    if gitlab_ctl_status_collect; then
       ctl_ok=1
     fi
 

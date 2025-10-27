@@ -82,7 +82,38 @@ print_active_container_summary() {
 
 cleanup_ladder_containers() {
   local -a raw_containers=() stale_containers=()
+  local -a keep_image_refs=() keep_image_ids=() keep_image_notes=()
   local entry id raw_name name image status running health command created id_short
+  local skip_image_cleanup=0
+
+  local current_image current_image_id last_upgraded_tag keep_note
+
+  current_image="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  current_image_id="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  last_upgraded_tag="$(get_state LAST_UPGRADED_TO || true)"
+
+  if [ -n "$current_image" ]; then
+    keep_image_refs+=("$current_image")
+    keep_note="контейнер ${CONTAINER_NAME}: ${current_image}"
+    keep_image_notes+=("$keep_note")
+  fi
+
+  if [ -n "$current_image_id" ]; then
+    keep_image_ids+=("$current_image_id")
+    if [ -z "$current_image" ]; then
+      keep_note="контейнер ${CONTAINER_NAME}: ${current_image_id}"
+      keep_image_notes+=("$keep_note")
+    fi
+  fi
+
+  if [ -n "$last_upgraded_tag" ]; then
+    local last_ref="gitlab/gitlab-ce:${last_upgraded_tag}"
+    if [[ "$last_upgraded_tag" == */* ]]; then
+      last_ref="$last_upgraded_tag"
+    fi
+    keep_image_refs+=("$last_ref")
+    keep_image_notes+=("state LAST_UPGRADED_TO: ${last_ref}")
+  fi
 
   mapfile -t raw_containers < <(docker_containers_using_data_root 2>/dev/null || true)
 
@@ -100,39 +131,128 @@ cleanup_ladder_containers() {
 
   if [ "${#stale_containers[@]}" -eq 0 ]; then
     ok "Старые контейнеры GitLab, связанные с ${DATA_ROOT}, не найдены"
-    print_active_container_summary || true
-    return 0
-  fi
+  else
+    log "[>] Найдены контейнеры GitLab, использующие ${DATA_ROOT} (возможно из лестницы апгрейдов): ${#stale_containers[@]} шт."
+    for entry in "${stale_containers[@]}"; do
+      IFS=$'\t' read -r id name image status running health command created <<< "$entry"
+      id_short="${id:0:12}"
+      local running_label="нет"
+      [ "$running" = "1" ] && running_label="да"
+      log "  - ${name} (${id_short}) — образ ${image}, статус ${status} (running=${running_label}), health=${health}"
+      if [ -n "$command" ]; then
+        log "    Команда: ${command}"
+      fi
+      log "    Создан: ${created}"
+    done
 
-  log "[>] Найдены контейнеры GitLab, использующие ${DATA_ROOT} (возможно из лестницы апгрейдов): ${#stale_containers[@]} шт."
-  for entry in "${stale_containers[@]}"; do
-    IFS=$'\t' read -r id name image status running health command created <<< "$entry"
-    id_short="${id:0:12}"
-    local running_label="нет"
-    [ "$running" = "1" ] && running_label="да"
-    log "  - ${name} (${id_short}) — образ ${image}, статус ${status} (running=${running_label}), health=${health}"
-    if [ -n "$command" ]; then
-      log "    Команда: ${command}"
-    fi
-    log "    Создан: ${created}"
-  done
-
-  if ! ask_yes_no "Удалить перечисленные контейнеры?" "n"; then
-    warn "Удаление контейнеров отменено пользователем"
-    print_active_container_summary || true
-    return 0
-  fi
-
-  for entry in "${stale_containers[@]}"; do
-    IFS=$'\t' read -r id name image status running health command created <<< "$entry"
-    if docker rm -f "$name" >/dev/null 2>&1; then
-      ok "Удалён контейнер ${name} (${id:0:12})"
+    if ask_yes_no "Удалить перечисленные контейнеры?" "n"; then
+      for entry in "${stale_containers[@]}"; do
+        IFS=$'\t' read -r id name image status running health command created <<< "$entry"
+        if docker rm -f "$name" >/dev/null 2>&1; then
+          ok "Удалён контейнер ${name} (${id:0:12})"
+        else
+          warn "Не удалось удалить контейнер ${name}"
+        fi
+      done
+      ok "Очистка контейнеров завершена"
     else
-      warn "Не удалось удалить контейнер ${name}"
+      warn "Удаление контейнеров отменено пользователем"
+      skip_image_cleanup=1
+    fi
+  fi
+
+  if [ "$skip_image_cleanup" -eq 1 ]; then
+    print_active_container_summary || true
+    return 0
+  fi
+
+  if [ "${#keep_image_refs[@]}" -eq 0 ] && [ "${#keep_image_ids[@]}" -eq 0 ]; then
+    warn "Не удалось определить актуальный образ GitLab — очистка образов пропущена"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  if [ "${#keep_image_notes[@]}" -gt 0 ]; then
+    log "[>] Образы, которые будут сохранены:"
+    for keep_note in "${keep_image_notes[@]}"; do
+      log "    - ${keep_note}"
+    done
+  fi
+
+  local -a raw_images=() stale_images=()
+  local -A seen_image_ids=()
+  mapfile -t raw_images < <(docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}' 'gitlab/gitlab-ce' 2>/dev/null || true)
+
+  if [ "${#raw_images[@]}" -eq 0 ]; then
+    ok "Локальные образы gitlab/gitlab-ce отсутствуют"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  for entry in "${raw_images[@]}"; do
+    [ -n "$entry" ] || continue
+    local repo_tag image_id created size keep_flag=0
+    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    [ -n "$image_id" ] || continue
+    if [ -n "${seen_image_ids[$image_id]:-}" ]; then
+      continue
+    fi
+    seen_image_ids[$image_id]=1
+
+    for keep_note in "${keep_image_refs[@]}"; do
+      if [ -n "$keep_note" ] && [ "$repo_tag" = "$keep_note" ]; then
+        keep_flag=1
+        break
+      fi
+    done
+
+    if [ "$keep_flag" -eq 0 ]; then
+      for keep_note in "${keep_image_ids[@]}"; do
+        if [ -n "$keep_note" ] && [ "$image_id" = "$keep_note" ]; then
+          keep_flag=1
+          break
+        fi
+      done
+    fi
+
+    if [ "$keep_flag" -eq 1 ]; then
+      continue
+    fi
+
+    stale_images+=("${repo_tag}$'\t'${image_id}$'\t'${created}$'\t'${size}")
+  done
+
+  if [ "${#stale_images[@]}" -eq 0 ]; then
+    ok "Все локальные образы gitlab/gitlab-ce соответствуют актуальным версиям — удаление не требуется"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  log "[>] Найдены неиспользуемые образы gitlab/gitlab-ce: ${#stale_images[@]} шт."
+  for entry in "${stale_images[@]}"; do
+    local repo_tag image_id created size
+    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    id_short="${image_id:7:12}"
+    log "  - ${repo_tag} (${id_short}) — создан ${created}, размер ${size}"
+  done
+
+  if ! ask_yes_no "Удалить перечисленные образы GitLab?" "n"; then
+    warn "Удаление образов отменено пользователем"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  for entry in "${stale_images[@]}"; do
+    local repo_tag image_id created size
+    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    if docker image rm "$image_id" >/dev/null 2>&1; then
+      ok "Удалён образ ${repo_tag} (${image_id:7:12})"
+    else
+      warn "Не удалось удалить образ ${repo_tag} (${image_id:7:12})"
     fi
   done
 
-  ok "Очистка контейнеров завершена"
+  ok "Очистка образов завершена"
   print_active_container_summary || true
 }
 
@@ -147,7 +267,7 @@ main() {
         echo "Использование: $0 [--reset|-r] [--clean|-c] [--cleanup-ladder] [--help|-h]"
         echo "  --reset, -r         Сбросить миграцию и начать заново"
         echo "  --clean, -c         Очистить каталоги /srv/gitlab без вопросов"
-        echo "  --cleanup-ladder    Удалить старые контейнеры GitLab, оставшиеся после лестницы"
+        echo "  --cleanup-ladder    Удалить старые контейнеры и образы GitLab, оставшиеся после лестницы"
         echo "  --help,  -h         Показать эту справку"
         exit 0 ;;
     esac
@@ -292,7 +412,7 @@ main() {
   log "Открой: https://<твой-домен>:${PORT_HTTPS}  (или http :${PORT_HTTP})"
 
   generate_migration_report
-  log "[hint] Для удаления временных контейнеров лестницы выполни: $0 --cleanup-ladder"
+  log "[hint] Для удаления временных контейнеров и образов лестницы выполни: $0 --cleanup-ladder"
 }
 
 trap error_trap ERR

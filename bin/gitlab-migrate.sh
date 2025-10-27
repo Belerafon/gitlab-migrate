@@ -126,7 +126,9 @@ cleanup_ladder_containers() {
       continue
     fi
 
-    stale_containers+=("${id}$'\t'${name}$'\t'${image}$'\t'${status}$'\t'${running}$'\t'${health}$'\t'${command}$'\t'${created}")
+    printf -v entry '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$id" "$name" "$image" "$status" "$running" "$health" "$command" "$created"
+    stale_containers+=("$entry")
   done
 
   if [ "${#stale_containers[@]}" -eq 0 ]; then
@@ -219,7 +221,8 @@ cleanup_ladder_containers() {
       continue
     fi
 
-    stale_images+=("${repo_tag}$'\t'${image_id}$'\t'${created}$'\t'${size}")
+    printf -v entry '%s\t%s\t%s\t%s' "$repo_tag" "$image_id" "$created" "$size"
+    stale_images+=("$entry")
   done
 
   if [ "${#stale_images[@]}" -eq 0 ]; then
@@ -230,10 +233,11 @@ cleanup_ladder_containers() {
 
   log "[>] Найдены неиспользуемые образы gitlab/gitlab-ce: ${#stale_images[@]} шт."
   for entry in "${stale_images[@]}"; do
-    local repo_tag image_id created size
+    local repo_tag image_id created size short_id
     IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
-    id_short="${image_id:7:12}"
-    log "  - ${repo_tag} (${id_short}) — создан ${created}, размер ${size}"
+    short_id="${image_id#sha256:}"
+    short_id="${short_id:0:12}"
+    log "  - ${repo_tag} (${short_id}) — создан ${created}, размер ${size}"
   done
 
   if ! ask_yes_no "Удалить перечисленные образы GitLab?" "n"; then
@@ -243,12 +247,14 @@ cleanup_ladder_containers() {
   fi
 
   for entry in "${stale_images[@]}"; do
-    local repo_tag image_id created size
+    local repo_tag image_id created size short_id
     IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    short_id="${image_id#sha256:}"
+    short_id="${short_id:0:12}"
     if docker image rm "$image_id" >/dev/null 2>&1; then
-      ok "Удалён образ ${repo_tag} (${image_id:7:12})"
+      ok "Удалён образ ${repo_tag} (${short_id})"
     else
-      warn "Не удалось удалить образ ${repo_tag} (${image_id:7:12})"
+      warn "Не удалось удалить образ ${repo_tag} (${short_id})"
     fi
   done
 

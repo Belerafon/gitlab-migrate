@@ -25,10 +25,116 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 LOCK_FILE="$BASEDIR/gitlab-migrate.pid"
 FORCE_CLEAN=0
+CLEANUP_LADDER=0
 
 . "$BASEDIR/lib/runtime.sh"
 
 cleanup_previous_run
+
+
+trim_spaces() {
+  local value="$1"
+  local trimmed="$value"
+
+  trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+  trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+
+  printf '%s' "$trimmed"
+}
+
+print_active_container_summary() {
+  local info id status running health image command ports fmt=""
+
+  if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$CONTAINER_NAME"; then
+    warn "Контейнер ${CONTAINER_NAME} не найден на хосте"
+    return 1
+  fi
+
+  printf -v fmt '{{.Id}}\t{{.State.Status}}\t{{if .State.Running}}1{{else}}0{{end}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t{{.Config.Image}}\t{{.Path}}{{range .Args}} {{.}}{{end}}'
+  info=$(docker inspect -f "$fmt" "$CONTAINER_NAME" 2>/dev/null || true)
+  if [ -z "$info" ]; then
+    warn "Не удалось получить сведения о контейнере ${CONTAINER_NAME}"
+    return 1
+  fi
+
+  IFS=$'\t' read -r id status running health image command <<< "$info"
+  command="$(trim_spaces "$command")"
+  local running_label="нет"
+  [ "$running" = "1" ] && running_label="да"
+
+  log "[>] Текущий контейнер: ${CONTAINER_NAME} (${id:0:12})"
+  log "    Статус: ${status} (running=${running_label}); health: ${health}"
+  log "    Образ: ${image}"
+  if [ -n "$command" ]; then
+    log "    Команда: ${command}"
+  fi
+
+  ports="$(docker_container_port_bindings "$CONTAINER_NAME" | sed '/^$/d')"
+  if [ -n "$ports" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      log "    Порт: ${line}"
+    done <<< "$ports"
+  else
+    log "    Порты: пробросы не обнаружены или контейнер остановлен"
+  fi
+}
+
+cleanup_ladder_containers() {
+  local -a raw_containers=() stale_containers=()
+  local entry id raw_name name image status running health command created id_short
+
+  mapfile -t raw_containers < <(docker_containers_using_data_root 2>/dev/null || true)
+
+  for entry in "${raw_containers[@]}"; do
+    IFS=$'\t' read -r id raw_name image status running health command created <<< "$entry"
+    name="${raw_name#/}"
+    command="$(trim_spaces "$command")"
+
+    if [ "$name" = "$CONTAINER_NAME" ]; then
+      continue
+    fi
+
+    stale_containers+=("${id}$'\t'${name}$'\t'${image}$'\t'${status}$'\t'${running}$'\t'${health}$'\t'${command}$'\t'${created}")
+  done
+
+  if [ "${#stale_containers[@]}" -eq 0 ]; then
+    ok "Старые контейнеры GitLab, связанные с ${DATA_ROOT}, не найдены"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  log "[>] Найдены контейнеры GitLab, использующие ${DATA_ROOT} (возможно из лестницы апгрейдов): ${#stale_containers[@]} шт."
+  for entry in "${stale_containers[@]}"; do
+    IFS=$'\t' read -r id name image status running health command created <<< "$entry"
+    id_short="${id:0:12}"
+    local running_label="нет"
+    [ "$running" = "1" ] && running_label="да"
+    log "  - ${name} (${id_short}) — образ ${image}, статус ${status} (running=${running_label}), health=${health}"
+    if [ -n "$command" ]; then
+      log "    Команда: ${command}"
+    fi
+    log "    Создан: ${created}"
+  done
+
+  if ! ask_yes_no "Удалить перечисленные контейнеры?" "n"; then
+    warn "Удаление контейнеров отменено пользователем"
+    print_active_container_summary || true
+    return 0
+  fi
+
+  for entry in "${stale_containers[@]}"; do
+    IFS=$'\t' read -r id name image status running health command created <<< "$entry"
+    if docker rm -f "$name" >/dev/null 2>&1; then
+      ok "Удалён контейнер ${name} (${id:0:12})"
+    else
+      warn "Не удалось удалить контейнер ${name}"
+    fi
+  done
+
+  ok "Очистка контейнеров завершена"
+  print_active_container_summary || true
+}
 
 
 main() {
@@ -36,16 +142,24 @@ main() {
     case $arg in
       --reset|-r) reset_migration ;;
       --clean|-c) FORCE_CLEAN=1 ;;
+      --cleanup-ladder) CLEANUP_LADDER=1 ;;
       --help|-h)
-        echo "Использование: $0 [--reset|-r] [--clean|-c] [--help|-h]"
-        echo "  --reset, -r  Сбросить миграцию и начать заново"
-        echo "  --clean, -c  Очистить каталоги /srv/gitlab без вопросов"
-        echo "  --help,  -h  Показать эту справку"
+        echo "Использование: $0 [--reset|-r] [--clean|-c] [--cleanup-ladder] [--help|-h]"
+        echo "  --reset, -r         Сбросить миграцию и начать заново"
+        echo "  --clean, -c         Очистить каталоги /srv/gitlab без вопросов"
+        echo "  --cleanup-ladder    Удалить старые контейнеры GitLab, оставшиеся после лестницы"
+        echo "  --help,  -h         Показать эту справку"
         exit 0 ;;
     esac
   done
 
   need_root; need_cmd docker; docker_ok || { err "Docker daemon недоступен"; exit 1; }
+
+  if [ "$CLEANUP_LADDER" -eq 1 ]; then
+    cleanup_ladder_containers
+    return
+  fi
+
   state_init
 
   log "[i] Лог выполнения (host): $LOG_FILE"
@@ -178,6 +292,7 @@ main() {
   log "Открой: https://<твой-домен>:${PORT_HTTPS}  (или http :${PORT_HTTP})"
 
   generate_migration_report
+  log "[hint] Для удаления временных контейнеров лестницы выполни: $0 --cleanup-ladder"
 }
 
 trap error_trap ERR

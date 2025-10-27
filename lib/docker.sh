@@ -348,6 +348,36 @@ container_status_summary() {
   printf "%s; health=%s; restarts=%s" "$status" "$health" "$restarts"
 }
 
+docker_containers_using_data_root() {
+  local fmt="" line=""
+
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+
+  printf -v fmt '{{.Id}}\t{{.Name}}\t{{.Config.Image}}\t{{.State.Status}}\t{{if .State.Running}}1{{else}}0{{end}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t{{.Path}}{{range .Args}} {{.}}{{end}}\t{{.Created}}\t{{range .Mounts}}{{if or (eq .Source "%s/config") (eq .Source "%s/data") (eq .Source "%s/logs")}}MATCH{{end}}{{end}}' \
+    "$DATA_ROOT" "$DATA_ROOT" "$DATA_ROOT"
+
+  docker ps -a -q 2>/dev/null | while IFS= read -r line; do
+    local info=""
+    [ -n "$line" ] || continue
+    info=$(docker inspect -f "$fmt" "$line" 2>/dev/null || true) || true
+    [[ "$info" == *$'\t'MATCH* ]] || continue
+    info=${info%$'\t'*}
+    printf '%s\n' "$info"
+  done
+}
+
+docker_container_port_bindings() {
+  local name="$1" fmt=""
+
+  [ -n "$name" ] || return 1
+
+  printf -v fmt '{{range $port, $bindings := .HostConfig.PortBindings}}{{if $bindings}}{{range $binding := $bindings}}{{if $binding.HostIp}}{{ $binding.HostIp }}{{else}}0.0.0.0{{end}}:{{ $binding.HostPort }} -> {{ $port }}{{"\n"}}{{end}}{{end}}{{end}}'
+
+  docker inspect -f "$fmt" "$name" 2>/dev/null || true
+}
+
 permissions_mark_pending() {
   set_state PERMISSIONS_PENDING 1
 }

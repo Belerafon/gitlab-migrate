@@ -183,7 +183,7 @@ cleanup_ladder_containers() {
 
   local -a raw_images=() stale_images=()
   local -A seen_image_ids=()
-  mapfile -t raw_images < <(docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}' 'gitlab/gitlab-ce' 2>/dev/null || true)
+  mapfile -t raw_images < <(docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}' 'gitlab/gitlab-ce' 2>/dev/null || true)
 
   if [ "${#raw_images[@]}" -eq 0 ]; then
     ok "Локальные образы gitlab/gitlab-ce отсутствуют"
@@ -193,8 +193,8 @@ cleanup_ladder_containers() {
 
   for entry in "${raw_images[@]}"; do
     [ -n "$entry" ] || continue
-    local repo_tag image_id created size keep_flag=0
-    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    local repo_tag image_id size keep_flag=0
+    IFS=$'\t' read -r repo_tag image_id size <<< "$entry"
     [ -n "$image_id" ] || continue
     if [ -n "${seen_image_ids[$image_id]:-}" ]; then
       continue
@@ -221,7 +221,7 @@ cleanup_ladder_containers() {
       continue
     fi
 
-    printf -v entry '%s\t%s\t%s\t%s' "$repo_tag" "$image_id" "$created" "$size"
+    printf -v entry '%s\t%s\t%s' "$repo_tag" "$image_id" "$size"
     stale_images+=("$entry")
   done
 
@@ -233,11 +233,11 @@ cleanup_ladder_containers() {
 
   log "[>] Найдены неиспользуемые образы gitlab/gitlab-ce: ${#stale_images[@]} шт."
   for entry in "${stale_images[@]}"; do
-    local repo_tag image_id created size short_id
-    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    local repo_tag image_id size short_id
+    IFS=$'\t' read -r repo_tag image_id size <<< "$entry"
     short_id="${image_id#sha256:}"
     short_id="${short_id:0:12}"
-    log "  - ${repo_tag} (${short_id}) — создан ${created}, размер ${size}"
+    log "  - ${repo_tag} (${short_id}) — размер ${size}"
   done
 
   if ! ask_yes_no "Удалить перечисленные образы GitLab?" "n"; then
@@ -247,8 +247,8 @@ cleanup_ladder_containers() {
   fi
 
   for entry in "${stale_images[@]}"; do
-    local repo_tag image_id created size short_id
-    IFS=$'\t' read -r repo_tag image_id created size <<< "$entry"
+    local repo_tag image_id size short_id
+    IFS=$'\t' read -r repo_tag image_id size <<< "$entry"
     short_id="${image_id#sha256:}"
     short_id="${short_id:0:12}"
     if docker image rm "$image_id" >/dev/null 2>&1; then
